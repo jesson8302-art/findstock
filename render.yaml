@@ -1,0 +1,45 @@
+# ─────────────────────────────────────────────────────────────
+# StockNLP — Render.com 백엔드 배포 설정
+# ─────────────────────────────────────────────────────────────
+# 1. render.com 접속 → New Web Service → GitHub 연결
+# 2. 이 저장소 선택 → Render가 render.yaml 자동 인식
+# 3. Environment Variables 탭에서 아래 항목 채우기:
+#      SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY /
+#      PUBLIC_DATA_KEY / DART_API_KEY / GEMINI_API_KEY
+# ─────────────────────────────────────────────────────────────
+
+services:
+  - type: web
+    name: stocknlp-api
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    plan: free               # 무료 티어 (750 h/월)
+    region: singapore        # 한국과 가장 가까운 리전
+
+    # 환경 변수 — Render 대시보드에서 직접 설정 (여기엔 키를 쓰지 마세요)
+    envVars:
+      - key: SUPABASE_URL
+        value: https://hcerfeiabqcsvufkgffk.supabase.co
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false          # 대시보드에서 직접 입력
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: PUBLIC_DATA_KEY
+        sync: false
+      - key: DART_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: CORS_ORIGINS
+        # Netlify 배포 후 실제 URL로 교체 (예: https://stocknlp.netlify.app)
+        value: "*"
+
+    # Health check
+    healthCheckPath: /api/health
+
+    # 무료 플랜은 15분 비활성 시 슬립 → 첫 요청 30초 소요될 수 있음
+    # 유료($7/월)로 올리면 슬립 없이 상시 가동

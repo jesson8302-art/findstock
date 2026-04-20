@@ -1,0 +1,34 @@
+# ─────────────────────────────────────────────────────────────
+# StockNLP — Netlify 배포 설정
+# ─────────────────────────────────────────────────────────────
+# 구조:
+#   프론트엔드 → Netlify  (이 파일)
+#   백엔드     → Render   (render.yaml 참고)
+# ─────────────────────────────────────────────────────────────
+
+[build]
+  base    = "frontend"         # Netlify가 작업할 디렉터리
+  command = "npm install && npm run build"
+  publish = "dist"             # 빌드 결과물 경로 (frontend/dist)
+
+[build.environment]
+  NODE_VERSION = "20"
+
+# SPA 라우팅 — 새로고침/직접 URL 접근 시 404 방지
+[[redirects]]
+  from   = "/*"
+  to     = "/index.html"
+  status = 200
+
+# 로컬 Netlify Dev 사용 시 백엔드 프록시 (선택)
+# [[dev]]
+#   command = "npm run dev"
+#   targetPort = 5173
+
+# ─────────────────────────────────────────────────────────────
+# Netlify 대시보드 > Site configuration > Environment variables 에서
+# 아래 변수를 추가하세요:
+#
+#   VITE_API_BASE = https://stocknlp-api.onrender.com
+#   (Render 배포 후 생성되는 URL로 교체)
+# ─────────────────────────────────────────────────────────────

@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>STOCKNLP · 자연어 종목 검색</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.development.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.development.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.css" />
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+    * { font-family: 'Inter', sans-serif; box-sizing: border-box; }
+    .spin { animation: spin 1s linear infinite; display:inline-block; }
+    @keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+    ::-webkit-scrollbar{width:5px} ::-webkit-scrollbar-track{background:#f1f5f9} ::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px}
+    input[type=range]{accent-color:#2563eb}
+  </style>
+</head>
+<body style="background:#f8fafc;margin:0">
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useMemo, useCallback } = React;
+
+// ── 인라인 SVG 아이콘 ─────────────────────────────────────────────────
+const paths = {
+  search:    ["M11 3a8 8 0 1 0 0 16A8 8 0 0 0 11 3zm0 0L21 21"],
+  trending:  ["M23 6l-9.5 9.5-5-5L1 18","M17 6h6v6"],
+  zap:       ["M13 2L3 14h9l-1 8 10-12h-9l1-8z"],
+  user:      ["M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2","M12 11a4 4 0 100-8 4 4 0 000 8"],
+  history:   ["M3 3v5h5","M3.05 13A9 9 0 106 5.3L3 8"],
+  bookmark:  ["M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"],
+  trash:     ["M3 6h18","M19 6l-1 14H6L5 6","M8 6V4h8v2"],
+  activity:  ["M22 12h-4l-3 9L9 3l-3 9H2"],
+  award:     ["M12 15a7 7 0 100-14 7 7 0 000 14z","M8.21 13.89L7 23l5-3 5 3-1.21-9.12"],
+  bar:       ["M18 20V10","M12 20V4","M6 20v-6"],
+  loader:    ["M12 2v4","M12 18v4","M4.93 4.93l2.83 2.83","M16.24 16.24l2.83 2.83","M2 12h4","M18 12h4","M4.93 19.07l2.83-2.83","M16.24 7.76l2.83-2.83"],
+  alert:     ["M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z","M12 9v4","M12 17h.01"],
+  coin:      ["M12 2a10 10 0 100 20A10 10 0 0012 2z","M12 6v6l4 2"],
+  percent:   ["M19 5L5 19","M6.5 6.5h.01","M17.5 17.5h.01"],
+  building:  ["M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z","M9 22V12h6v10"],
+  flame:     ["M8.5 14.5A2.5 2.5 0 0011 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 11-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 002.5 3z"],
+};
+const Ic = ({ name, size=18, stroke="#1e293b", fill="none", sw=2 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill={fill} stroke={stroke} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round">
+    {(paths[name]||[]).map((d,i)=><path key={i} d={d}/>)}
+  </svg>
+);
+
+// ── Mock 데이터 ───────────────────────────────────────────────────────
+function genHist(base, n=150) {
+  let p=base;
+  return Array.from({length:n},(_,i)=>{
+    const ch=(Math.random()-.5)*.04, o=p, c=p*(1+ch);
+    const h=Math.max(o,c)*(1+Math.random()*.015), l=Math.min(o,c)*(1-Math.random()*.015);
+    p=c;
+    return {date:`2026-${String(Math.floor(i/30)+1).padStart(2,'0')}-${String((i%30)+1).padStart(2,'0')}`,open:o,high:h,low:l,close:c,volume:Math.floor(Math.random()*3e6)+2e5};
+  });
+}
+
+const MOCK_STOCKS = [
+  {code:'000660',name:'SK하이닉스',sector:'반도체',is_leader:true,leader_name:'SK하이닉스',buy_score:95,rsi:72,rsi_prev:60,profit_growth_years:1,price:185000,change:-0.5,market_cap_trillion:134.8,dividend_yield:0.6,history:genHist(185000),financials:{revenue:'45.1조',profit:'8.2조',roe:'15.1%',desc:'HBM 시장 독점적 지위 확보로 섹터 내 가장 강력한 주도주 모멘텀 보유.'}},
+  {code:'005380',name:'현대차',sector:'자동차',is_leader:true,leader_name:'현대차',buy_score:88,rsi:58,rsi_prev:45,profit_growth_years:4,price:250000,change:2.1,market_cap_trillion:53.2,dividend_yield:3.8,history:genHist(250000),financials:{revenue:'162.7조',profit:'15.1조',roe:'10.8%',desc:'하이브리드 및 전기차 믹스 개선으로 역대 최대 실적 경신 중.'}},
+  {code:'006400',name:'삼성SDI',sector:'2차전지',is_leader:false,leader_name:'LG에너지솔루션',buy_score:81,rsi:61,rsi_prev:50,profit_growth_years:2,price:410000,change:1.8,market_cap_trillion:28.2,dividend_yield:1.2,history:genHist(410000),financials:{revenue:'22.1조',profit:'2.4조',roe:'9.1%',desc:'전기차 배터리 수요 증가에 따른 수혜주로 하반기 실적 개선 기대.'}},
+  {code:'005930',name:'삼성전자',sector:'반도체',is_leader:false,leader_name:'SK하이닉스',buy_score:74,rsi:68,rsi_prev:48,profit_growth_years:3,price:72500,change:1.2,market_cap_trillion:432.5,dividend_yield:2.1,history:genHist(72500),financials:{revenue:'302.2조',profit:'35.8조',roe:'12.5%',desc:'메모리 업황 회복세가 뚜렷하며 3년 연속 영업이익 우상향 기조 유지 중.'}},
+  {code:'105560',name:'KB금융',sector:'금융',is_leader:true,leader_name:'KB금융',buy_score:79,rsi:55,rsi_prev:48,profit_growth_years:3,price:92000,change:0.8,market_cap_trillion:37.6,dividend_yield:5.2,history:genHist(92000),financials:{revenue:'18.2조',profit:'5.1조',roe:'11.4%',desc:'이자이익 증가와 배당 확대 기조로 주주환원 강화 중.'}},
+  {code:'035420',name:'NAVER',sector:'인터넷',is_leader:true,leader_name:'NAVER',buy_score:62,rsi:45,rsi_prev:42,profit_growth_years:2,price:192000,change:0.5,market_cap_trillion:31.4,dividend_yield:0.4,history:genHist(192000),financials:{revenue:'9.6조',profit:'1.4조',roe:'8.2%',desc:'광고 및 커머스 성장세는 안정적이나 신사업 투자 비용 증가 추세.'}},
+  {code:'035720',name:'카카오',sector:'인터넷',is_leader:false,leader_name:'NAVER',buy_score:55,rsi:41,rsi_prev:38,profit_growth_years:0,price:48500,change:-1.1,market_cap_trillion:21.5,dividend_yield:0.0,history:genHist(48500),financials:{revenue:'8.3조',profit:'0.6조',roe:'4.5%',desc:'규제 리스크 및 플랫폼 성장 둔화로 단기 모멘텀이 약화된 상태.'}},
+  {code:'207940',name:'삼성바이오로직스',sector:'바이오',is_leader:true,leader_name:'삼성바이오로직스',buy_score:83,rsi:63,rsi_prev:55,profit_growth_years:3,price:910000,change:1.4,market_cap_trillion:64.8,dividend_yield:0.0,history:genHist(910000),financials:{revenue:'4.5조',profit:'1.2조',roe:'14.2%',desc:'CMO 수주 확대로 바이오 섹터 내 독보적 성장세 지속.'}},
+];
+
+const MOCK_INDICES = [
+  {idx_code:'KOSPI',idx_name:'코스피',date:'2026-04-19',close:2650.3,change_pct:0.52},
+  {idx_code:'KOSDAQ',idx_name:'코스닥',date:'2026-04-19',close:860.7,change_pct:-0.21},
+  {idx_code:'KRX300',idx_name:'KRX300',date:'2026-04-19',close:1820.1,change_pct:0.38},
+];
+
+const MOCK_COMMODITIES = [
+  {code:'GOLD',name:'금',date:'2026-04-19',close:480250,unit:'원/g'},
+  {code:'DUBAI_OIL',name:'두바이유',date:'2026-04-19',close:74.3,unit:'달러/배럴'},
+  {code:'WTI',name:'WTI',date:'2026-04-19',close:72.1,unit:'달러/배럴'},
+];
+
+// ── 로컬 파서 ────────────────────────────────────────────────────────
+function localParse(text) {
+  const f = {};
+  const rr=text.match(/RSI[^\d]*(\d{1,3})\s*[~\-–]\s*(\d{1,3})/i);
+  const rm=text.match(/RSI[^\d]*(\d{1,3})\s*이상/i);
+  const rx=text.match(/RSI[^\d]*(\d{1,3})\s*이하/i);
+  if(rr) f.rsi={min:+rr[1],max:+rr[2]};
+  else { const r={}; if(rm)r.min=+rm[1]; if(rx)r.max=+rx[1]; if(Object.keys(r).length)f.rsi=r; }
+  const pg=text.match(/(\d+)\s*년.*(영업이익|이익)/); if(pg)f.profit_growth_years=+pg[1];
+  if(/주도주|대장주/.test(text))f.is_leader=true;
+  const ss=['반도체','자동차','인터넷','바이오','2차전지','금융','화학','철강','통신','건설','유통','엔터','게임'];
+  const sec=ss.find(s=>text.includes(s)); if(sec)f.sector=sec;
+  const cap=text.match(/시총\s*(\d+(?:\.\d+)?)\s*조\s*이상/); if(cap)f.market_cap_trillion_min=+cap[1];
+  const div=text.match(/배당\s*(?:수익률\s*)?(\d+(?:\.\d+)?)\s*%?\s*이상/); if(div)f.dividend_yield_min=+div[1];
+  return f;
+}
+function applyFilters(list, f) {
+  return list.filter(s=>{
+    if(f.rsi?.min!=null&&s.rsi<f.rsi.min)return false;
+    if(f.rsi?.max!=null&&s.rsi>f.rsi.max)return false;
+    if(f.profit_growth_years!=null&&s.profit_growth_years<f.profit_growth_years)return false;
+    if(f.is_leader===true&&!s.is_leader)return false;
+    if(f.sector&&s.sector!==f.sector)return false;
+    if(f.market_cap_trillion_min!=null&&(s.market_cap_trillion||0)<f.market_cap_trillion_min)return false;
+    if(f.dividend_yield_min!=null&&(s.dividend_yield||0)<f.dividend_yield_min)return false;
+    return true;
+  });
+}
+
+// ── 지수 위젯 ────────────────────────────────────────────────────────
+function IndexBar({ indices, commodities }) {
+  return (
+    <div style={{background:'#0f172a',borderBottom:'1px solid #1e293b',padding:'7px 0',overflow:'hidden'}}>
+      <div style={{maxWidth:1280,margin:'0 auto',padding:'0 16px',display:'flex',alignItems:'center',gap:'28px',flexWrap:'wrap'}}>
+        {/* 지수 */}
+        {indices.map(idx=>(
+          <div key={idx.idx_code} style={{display:'flex',alignItems:'center',gap:'8px'}}>
+            <span style={{fontSize:'11px',fontWeight:800,color:'#64748b',letterSpacing:'-.2px'}}>{idx.idx_name}</span>
+            <span style={{fontSize:'13px',fontWeight:800,color:'#f1f5f9'}}>{idx.close.toLocaleString()}</span>
+            <span style={{fontSize:'11px',fontWeight:700,color:idx.change_pct>=0?'#f87171':'#60a5fa'}}>
+              {idx.change_pct>=0?'▲':'▼'}{Math.abs(idx.change_pct).toFixed(2)}%
+            </span>
+          </div>
+        ))}
+        <div style={{width:1,height:16,background:'#1e293b'}}/>
+        {/* 원자재 */}
+        {commodities.map(c=>(
+          <div key={c.code} style={{display:'flex',alignItems:'center',gap:'6px'}}>
+            <span style={{fontSize:'11px',fontWeight:800,color:'#64748b'}}>{c.name}</span>
+            <span style={{fontSize:'12px',fontWeight:700,color:'#fbbf24'}}>
+              {c.close.toLocaleString()}<span style={{fontSize:'9px',color:'#64748b',marginLeft:2}}>{c.unit}</span>
+            </span>
+          </div>
+        ))}
+        <div style={{marginLeft:'auto',fontSize:'10px',color:'#334155',fontWeight:600}}>MOCK 데이터</div>
+      </div>
+    </div>
+  );
+}
+
+// ── 필터 배지 ────────────────────────────────────────────────────────
+function FilterBadges({ filters }) {
+  if(!filters||!Object.keys(filters).length)return null;
+  const tags=[];
+  if(filters.rsi){const{min,max}=filters.rsi;if(min!=null&&max!=null)tags.push(`RSI ${min}~${max}`);else if(min!=null)tags.push(`RSI ≥ ${min}`);else if(max!=null)tags.push(`RSI ≤ ${max}`);}
+  if(filters.profit_growth_years)tags.push(`영업이익 ${filters.profit_growth_years}년↑`);
+  if(filters.is_leader)tags.push('주도주');
+  if(filters.sector)tags.push(filters.sector);
+  if(filters.market_cap_trillion_min)tags.push(`시총 ${filters.market_cap_trillion_min}조↑`);
+  if(filters.dividend_yield_min)tags.push(`배당 ${filters.dividend_yield_min}%↑`);
+  if(!tags.length)return null;
+  return (
+    <div style={{display:'flex',flexWrap:'wrap',gap:6,marginTop:10,alignItems:'center'}}>
+      <span style={{fontSize:10,fontWeight:700,color:'#94a3b8'}}>파싱 필터:</span>
+      {tags.map(t=><span key={t} style={{fontSize:11,fontWeight:700,padding:'3px 10px',borderRadius:99,background:'#eff6ff',color:'#2563eb',border:'1px solid #bfdbfe'}}>{t}</span>)}
+    </div>
+  );
+}
+
+// ── 캔들차트 ─────────────────────────────────────────────────────────
+function StockChart({stock,filters,maVisible,setMaVisible,visibleRange,setVisibleRange}){
+  const data=useMemo(()=>stock.history.slice(-visibleRange),[stock,visibleRange]);
+  const W=820,H=340,PAD=52,VH=55;
+  const prices=data.flatMap(d=>[d.high,d.low]);
+  const minP=Math.min(...prices)*.985,maxP=Math.max(...prices)*1.015;
+  const maxV=Math.max(...data.map(d=>d.volume));
+  const gx=i=>PAD+(i*(W-PAD*2))/Math.max(1,data.length-1);
+  const gy=p=>H-PAD-VH-((p-minP)/(maxP-minP))*(H-PAD*2-VH);
+  const gvy=v=>H-PAD-(v/maxV)*VH;
+  const MAS=[{p:5,c:'#f59e0b'},{p:10,c:'#10b981'},{p:20,c:'#ef4444'},{p:60,c:'#3b82f6'},{p:120,c:'#8b5cf6'},{p:240,c:'#64748b'}];
+  const renderMA=({p,c})=>{
+    if(!maVisible[p])return null;
+    const pts=data.map((_,i)=>{const fi=stock.history.length-visibleRange+i;if(fi<p-1)return null;const sl=stock.history.slice(fi-p+1,fi+1);return `${gx(i)},${gy(sl.reduce((a,c)=>a+c.close,0)/p)}`;}).filter(Boolean).join(' ');
+    return pts?<polyline key={p} points={pts} fill="none" stroke={c} strokeWidth="1.5" opacity=".85"/>:null;
+  };
+  return (
+    <div style={{background:'#fff',padding:24,borderRadius:16,border:'1px solid #e2e8f0',boxShadow:'inset 0 2px 4px rgba(0,0,0,.04)'}}>
+      <div style={{display:'flex',flexWrap:'wrap',alignItems:'center',justifyContent:'space-between',gap:12,marginBottom:14}}>
+        <div style={{display:'flex',flexWrap:'wrap',gap:10}}>
+          {MAS.map(({p,c})=>(
+            <label key={p} style={{display:'flex',alignItems:'center',gap:5,cursor:'pointer',userSelect:'none'}}>
+              <input type="checkbox" checked={!!maVisible[p]} onChange={()=>setMaVisible(prev=>({...prev,[p]:!prev[p]}))} style={{width:13,height:13,accentColor:c,cursor:'pointer'}}/>
+              <span style={{fontSize:11,fontWeight:700,color:maVisible[p]?c:'#94a3b8'}}>{p}일</span>
+            </label>
+          ))}
+        </div>
+        <div style={{display:'flex',alignItems:'center',gap:8,background:'#f8fafc',padding:'6px 12px',borderRadius:8,border:'1px solid #f1f5f9',flex:'0 1 230px'}}>
+          <span style={{fontSize:10,fontWeight:800,color:'#94a3b8',whiteSpace:'nowrap'}}>범위 ({visibleRange}일)</span>
+          <input type="range" min="5" max="120" value={visibleRange} onChange={e=>setVisibleRange(+e.target.value)} style={{width:'100%',cursor:'pointer'}}/>
+        </div>
+      </div>
+      <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} style={{overflow:'visible',userSelect:'none'}}>
+        {[0,1,2,3,4].map(i=>{const v=minP+(maxP-minP)*(i/4),y=gy(v);return(<g key={i}><line x1={PAD} y1={y} x2={W-PAD} y2={y} stroke="#f1f5f9" strokeDasharray="4 4"/><text x={PAD-8} y={y} textAnchor="end" fontSize="10" fill="#94a3b8" dominantBaseline="middle">{Math.round(v).toLocaleString()}</text></g>);})}
+        {data.map((d,i)=>{const x=gx(i),isUp=d.close>=d.open,col=isUp?'#ef4444':'#3b82f6',y1=Math.min(gy(d.open),gy(d.close)),ch=Math.max(1,Math.abs(gy(d.open)-gy(d.close)));return(<g key={i}><rect x={x-4} y={gvy(d.volume)} width="8" height={H-PAD-gvy(d.volume)} fill={col} opacity=".18"/><line x1={x} y1={gy(d.high)} x2={x} y2={gy(d.low)} stroke={col} strokeWidth="1"/><rect x={x-4} y={y1} width="8" height={ch} fill={col}/></g>);})}
+        {MAS.map(renderMA)}
+        {filters?.rsi&&<g transform={`translate(${W-PAD-118},${PAD})`}><rect width="108" height="22" rx="4" fill="#2563eb"/><text x="54" y="15" textAnchor="middle" fontSize="11" fill="white" fontWeight="bold">RSI(14): {stock.rsi}</text></g>}
+      </svg>
+    </div>
+  );
+}
+
+// ── 종목 카드 ─────────────────────────────────────────────────────────
+function StockCard({s, selected, onSelect}) {
+  const active = selected?.code===s.code;
+  return (
+    <div onClick={()=>onSelect(s)} style={{padding:18,borderRadius:16,border:`2px solid ${active?'#3b82f6':'#fff'}`,background:active?'#eff6ff':'#fff',cursor:'pointer',boxShadow:active?'0 0 0 4px rgba(59,130,246,.12)':'0 1px 3px rgba(0,0,0,.06)',transition:'all .15s'}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:10}}>
+        <div>
+          <div style={{fontWeight:900,fontSize:18,color:'#0f172a'}}>{s.name}</div>
+          <div style={{fontSize:10,fontWeight:700,color:'#94a3b8',textTransform:'uppercase',marginTop:2}}>{s.code} · {s.sector}</div>
+        </div>
+        <div style={{fontSize:11,fontWeight:900,color:'#2563eb',background:'#eff6ff',padding:'3px 10px',borderRadius:8}}>STRG {s.buy_score}</div>
+      </div>
+      {/* 시총 + 배당 뱃지 */}
+      <div style={{display:'flex',gap:5,marginBottom:8,flexWrap:'wrap'}}>
+        {s.market_cap_trillion&&<span style={{fontSize:10,fontWeight:700,background:'#f1f5f9',color:'#475569',padding:'2px 7px',borderRadius:6}}>시총 {s.market_cap_trillion.toFixed(1)}조</span>}
+        {s.dividend_yield>0&&<span style={{fontSize:10,fontWeight:700,background:'#f0fdf4',color:'#16a34a',padding:'2px 7px',borderRadius:6}}>배당 {s.dividend_yield.toFixed(1)}%</span>}
+      </div>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end'}}>
+        <div style={{display:'flex',gap:5,flexWrap:'wrap'}}>
+          {s.is_leader&&<span style={{fontSize:10,padding:'2px 8px',borderRadius:99,fontWeight:900,background:'#fbbf24',color:'#fff'}}>주도주</span>}
+          {s.profit_growth_years>=3&&<span style={{fontSize:10,padding:'2px 8px',borderRadius:99,fontWeight:900,background:'#22c55e',color:'#fff'}}>성장형</span>}
+        </div>
+        <div style={{textAlign:'right'}}>
+          <div style={{fontWeight:900,fontSize:15,color:'#0f172a'}}>{s.price.toLocaleString()}원</div>
+          <div style={{fontSize:11,fontWeight:700,color:s.change>=0?'#ef4444':'#3b82f6'}}>{s.change>=0?'▲':'▼'}{Math.abs(s.change)}%</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── 상세 패널 ─────────────────────────────────────────────────────────
+function DetailPanel({stock, filters, bookmarks, toggleBookmark, maVisible, setMaVisible, visibleRange, setVisibleRange}) {
+  const isBookmarked = bookmarks.find(b=>b.code===stock.code);
+  return (
+    <div style={{background:'#fff',borderRadius:24,border:'1px solid #e2e8f0',boxShadow:'0 4px 24px rgba(0,0,0,.07)',padding:32,position:'sticky',top:80,overflow:'hidden'}}>
+      {/* 헤더 */}
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:24,flexWrap:'wrap',gap:16}}>
+        <div style={{display:'flex',alignItems:'center',gap:16}}>
+          <div style={{width:52,height:52,background:'#0f172a',borderRadius:14,display:'flex',alignItems:'center',justifyContent:'center',color:'#fff',fontWeight:900,fontSize:20}}>{stock.name[0]}</div>
+          <div>
+            <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+              <h2 style={{fontSize:26,fontWeight:900,color:'#0f172a',margin:0}}>{stock.name}</h2>
+              <button onClick={()=>toggleBookmark(stock)} style={{background:'none',border:'none',cursor:'pointer',padding:2,display:'flex'}}>
+                <svg width="24" height="24" viewBox="0 0 24 24" fill={isBookmarked?'#fbbf24':'none'} stroke={isBookmarked?'#fbbf24':'#cbd5e1'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>
+              </button>
+            </div>
+            <div style={{fontSize:11,fontWeight:700,color:'#94a3b8',marginTop:4}}>{stock.sector} 섹터 · {stock.code}</div>
+          </div>
+        </div>
+        <div style={{textAlign:'right'}}>
+          <div style={{fontSize:10,fontWeight:900,color:'#94a3b8',textTransform:'uppercase',letterSpacing:1,marginBottom:4}}>Score</div>
+          <div style={{display:'flex',alignItems:'baseline',gap:3}}>
+            <span style={{fontSize:48,fontWeight:900,color:'#2563eb',lineHeight:1}}>{stock.buy_score}</span>
+            <span style={{fontSize:18,fontWeight:700,color:'#e2e8f0'}}>/100</span>
+          </div>
+        </div>
+      </div>
+
+      {/* 핵심 지표 요약 바 */}
+      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8,marginBottom:20}}>
+        {[
+          {label:'현재가',value:`${stock.price.toLocaleString()}원`,sub:null,color:'#0f172a'},
+          {label:'RSI(14)',value:stock.rsi,sub:stock.rsi>=70?'과매수':stock.rsi<=30?'과매도':'중립',color:stock.rsi>=70?'#ef4444':stock.rsi<=30?'#3b82f6':'#10b981'},
+          {label:'시가총액',value:stock.market_cap_trillion?`${stock.market_cap_trillion.toFixed(1)}조`:'-',sub:null,color:'#7c3aed'},
+          {label:'배당수익률',value:stock.dividend_yield>0?`${stock.dividend_yield.toFixed(1)}%`:'-',sub:null,color:'#16a34a'},
+        ].map(({label,value,sub,color})=>(
+          <div key={label} style={{background:'#f8fafc',borderRadius:12,padding:'10px 12px',border:'1px solid #f1f5f9',textAlign:'center'}}>
+            <div style={{fontSize:9,fontWeight:800,color:'#94a3b8',textTransform:'uppercase',letterSpacing:.5,marginBottom:4}}>{label}</div>
+            <div style={{fontSize:16,fontWeight:900,color}}>{value}</div>
+            {sub&&<div style={{fontSize:9,fontWeight:700,color,marginTop:2}}>{sub}</div>}
+          </div>
+        ))}
+      </div>
+
+      {/* 차트 */}
+      <StockChart stock={stock} filters={filters} maVisible={maVisible} setMaVisible={setMaVisible} visibleRange={visibleRange} setVisibleRange={setVisibleRange}/>
+
+      {/* 하단 카드 */}
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16,marginTop:20}}>
+        <div style={{padding:20,borderRadius:16,border:'2px solid #f1f5f9',background:'#f8fafc'}}>
+          <h3 style={{fontWeight:900,color:'#0f172a',display:'flex',alignItems:'center',gap:8,fontSize:13,marginBottom:14,marginTop:0}}>
+            <Ic name="award" size={16} stroke="#f59e0b" fill="#f59e0b"/> 섹터 내 위상
+          </h3>
+          {stock.is_leader
+            ?<p style={{fontSize:12,color:'#92400e',lineHeight:'1.6',fontWeight:700,textDecoration:'underline',textDecorationColor:'#fcd34d',textDecorationThickness:2,margin:0}}>현재 섹터 주도 대장주입니다.</p>
+            :<p style={{fontSize:12,color:'#64748b',lineHeight:'1.6',margin:0}}>섹터 내 주도주: <strong style={{color:'#2563eb'}}>{stock.leader_name}</strong></p>}
+          <div style={{marginTop:12,display:'flex',gap:16,flexWrap:'wrap'}}>
+            <div style={{textAlign:'center'}}><div style={{fontSize:9,fontWeight:700,color:'#94a3b8'}}>영업익 상승</div><div style={{fontSize:18,fontWeight:900,color:'#0f172a'}}>{stock.profit_growth_years}년↑</div></div>
+            <div style={{textAlign:'center'}}><div style={{fontSize:9,fontWeight:700,color:'#94a3b8'}}>등락률</div><div style={{fontSize:18,fontWeight:900,color:stock.change>=0?'#ef4444':'#3b82f6'}}>{stock.change>=0?'+':''}{stock.change}%</div></div>
+          </div>
+        </div>
+        <div style={{background:'#0f172a',color:'#fff',padding:20,borderRadius:16}}>
+          <h3 style={{fontWeight:900,display:'flex',alignItems:'center',gap:8,fontSize:13,marginBottom:14,marginTop:0}}>
+            <Ic name="bar" size={16} stroke="#3b82f6"/> DART 재무 요약
+          </h3>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,marginBottom:14,textAlign:'center'}}>
+            {[['매출',stock.financials.revenue,'#94a3b8'],['영업익',stock.financials.profit,'#fb923c'],['ROE',stock.financials.roe,'#4ade80']].map(([k,v,c])=>(
+              <div key={k} style={{background:'#1e293b',padding:8,borderRadius:8}}>
+                <div style={{fontSize:9,color:'#64748b',textTransform:'uppercase',fontWeight:700}}>{k}</div>
+                <div style={{fontSize:12,fontWeight:800,color:c,marginTop:2}}>{v}</div>
+              </div>
+            ))}
+          </div>
+          <p style={{fontSize:11,lineHeight:'1.6',color:'#94a3b8',fontStyle:'italic',margin:0}}>"{stock.financials.desc}"</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── 메인 앱 ──────────────────────────────────────────────────────────
+function App() {
+  const [tab, setTab]           = useState('search');
+  const [query, setQuery]       = useState('');
+  const [searching, setSearching] = useState(false);
+  const [results, setResults]   = useState([]);
+  const [filters, setFilters]   = useState(null);
+  const [selected, setSelected] = useState(null);
+  const [error, setError]       = useState(null);
+  const [maVisible, setMaVisible] = useState({5:true,10:false,20:true,60:true,120:false,240:false});
+  const [visibleRange, setVisibleRange] = useState(40);
+  const [savedQueries, setSavedQueries] = useState([
+    {id:1,text:'RSI 60 이상, 영업이익 3년 연속 상승',date:'2026-04-18'},
+    {id:2,text:'배당 3% 이상인 금융 섹터',date:'2026-04-17'},
+    {id:3,text:'시총 50조 이상 자동차 주도주',date:'2026-04-16'},
+    {id:4,text:'반도체 주도주 RSI 65~75',date:'2026-04-15'},
+  ]);
+  const [bookmarks, setBookmarks] = useState([]);
+
+  const handleSearch = useCallback(async (q=query) => {
+    const txt=q.trim(); if(!txt)return;
+    setSearching(true); setError(null); setTab('search');
+    await new Promise(r=>setTimeout(r,280));
+    try {
+      const f=localParse(txt);
+      const res=applyFilters(MOCK_STOCKS,f).sort((a,b)=>b.buy_score-a.buy_score);
+      setFilters(f); setResults(res);
+      setSelected(res.length>0?res[0]:null);
+      if(!savedQueries.find(s=>s.text===txt))
+        setSavedQueries(prev=>[{id:Date.now(),text:txt,date:new Date().toISOString().split('T')[0]},...prev]);
+    } catch(e) {
+      setError('검색 중 오류가 발생했어요.');
+    } finally { setSearching(false); }
+  }, [query, savedQueries]);
+
+  const toggleBookmark = s => setBookmarks(prev=>prev.find(b=>b.code===s.code)?prev.filter(b=>b.code!==s.code):[...prev,s]);
+
+  return (
+    <div style={{minHeight:'100vh',background:'#f8fafc',color:'#0f172a',paddingBottom:48}}>
+      {/* 시세 티커 바 */}
+      <IndexBar indices={MOCK_INDICES} commodities={MOCK_COMMODITIES}/>
+
+      {/* NAV */}
+      <nav style={{background:'#fff',borderBottom:'1px solid #e2e8f0',position:'sticky',top:0,zIndex:50,boxShadow:'0 1px 3px rgba(0,0,0,.06)'}}>
+        <div style={{maxWidth:1280,margin:'0 auto',padding:'0 16px',height:60,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+          <div onClick={()=>setTab('search')} style={{display:'flex',alignItems:'center',gap:10,fontWeight:900,fontSize:20,color:'#2563eb',cursor:'pointer',letterSpacing:'-1px'}}>
+            <Ic name="trending" size={22} stroke="#2563eb" sw={3}/>
+            <span>STOCK<span style={{color:'#0f172a'}}>NLP</span></span>
+            <span style={{fontSize:9,fontWeight:700,background:'#eff6ff',color:'#2563eb',padding:'2px 7px',borderRadius:99,border:'1px solid #bfdbfe',letterSpacing:0}}>DEMO</span>
+          </div>
+          <div style={{display:'flex',gap:5,background:'#f1f5f9',padding:5,borderRadius:12,border:'1px solid #e2e8f0'}}>
+            {[['search','종목 검색','search'],['mypage','마이페이지','user']].map(([t,label,icon])=>(
+              <button key={t} onClick={()=>setTab(t)} style={{padding:'7px 18px',borderRadius:9,fontSize:12,fontWeight:700,border:'none',cursor:'pointer',display:'flex',alignItems:'center',gap:6,transition:'all .15s',background:tab===t?'#fff':'transparent',color:tab===t?'#2563eb':'#64748b',boxShadow:tab===t?'0 1px 4px rgba(0,0,0,.1)':'none'}}>
+                <Ic name={icon} size={14} stroke={tab===t?'#2563eb':'#64748b'}/>{label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </nav>
+
+      <main style={{maxWidth:1280,margin:'0 auto',padding:'28px 16px'}}>
+        {tab==='search' ? (
+          <div style={{display:'grid',gridTemplateColumns:'repeat(12,1fr)',gap:24}}>
+            {/* 검색창 */}
+            <div style={{gridColumn:'1/-1'}}>
+              <div style={{background:'#fff',borderRadius:22,boxShadow:'0 4px 24px rgba(0,0,0,.07)',padding:'28px 32px',border:'1px solid #e2e8f0',position:'relative',overflow:'hidden'}}>
+                <div style={{position:'absolute',top:0,left:0,width:4,height:'100%',background:'#2563eb',borderRadius:'4px 0 0 4px'}}/>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16,flexWrap:'wrap',gap:10}}>
+                  <h2 style={{fontSize:16,fontWeight:800,display:'flex',alignItems:'center',gap:8,color:'#0f172a',margin:0}}>
+                    <Ic name="zap" size={17} stroke="#2563eb" fill="#2563eb"/> 자연어 검색 필터
+                  </h2>
+                  <span style={{fontSize:10,padding:'3px 10px',borderRadius:99,fontWeight:700,color:'#64748b',background:'#f1f5f9',border:'1px solid #e2e8f0'}}>
+                    MOCK · 시총·배당 필터 지원
+                  </span>
+                </div>
+                <textarea value={query} onChange={e=>setQuery(e.target.value)}
+                  onKeyDown={e=>{if(e.key==='Enter'&&(e.metaKey||e.ctrlKey))handleSearch();}}
+                  placeholder="예: RSI 55~75, 3년 연속 영업이익, 배당 3% 이상인 금융 섹터 / 시총 50조 이상 자동차 주도주"
+                  style={{width:'100%',height:80,padding:'16px 18px',background:'#f8fafc',border:'2px solid #e2e8f0',borderRadius:14,resize:'none',fontSize:16,fontWeight:600,color:'#0f172a',lineHeight:1.5,outline:'none',transition:'all .2s'}}
+                  onFocus={e=>{e.target.style.borderColor='#3b82f6';e.target.style.boxShadow='0 0 0 4px rgba(37,99,235,.1)';}}
+                  onBlur={e=>{e.target.style.borderColor='#e2e8f0';e.target.style.boxShadow='none';}}
+                />
+                {error&&<div style={{marginTop:10,display:'flex',alignItems:'center',gap:8,fontSize:12,color:'#dc2626',background:'#fef2f2',border:'1px solid #fecaca',padding:'8px 14px',borderRadius:10}}><Ic name="alert" size={14} stroke="#dc2626"/>{error}</div>}
+                <FilterBadges filters={filters}/>
+                <div style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap',marginTop:16}}>
+                  <button onClick={()=>handleSearch()} disabled={searching}
+                    style={{padding:'12px 36px',background:searching?'#cbd5e1':'#2563eb',color:'#fff',border:'none',borderRadius:12,fontWeight:900,fontSize:15,cursor:searching?'not-allowed':'pointer',display:'flex',alignItems:'center',gap:8,boxShadow:'0 4px 12px rgba(37,99,235,.3)',transition:'all .15s'}}>
+                    {searching?<><span className="spin"><Ic name="loader" size={16} stroke="#fff"/></span>분석 중…</>:<><Ic name="activity" size={16} stroke="#fff"/>AI 종목 분석 시작</>}
+                  </button>
+                  <span style={{fontSize:11,color:'#94a3b8',fontWeight:500}}>⌘+Enter 단축키</span>
+                  {/* 빠른 검색 예시 */}
+                  <div style={{display:'flex',gap:6,flexWrap:'wrap',marginLeft:'auto'}}>
+                    {['배당 3% 이상','시총 50조↑ 주도주','반도체 RSI 60~75'].map(ex=>(
+                      <button key={ex} onClick={()=>{setQuery(ex);handleSearch(ex);}}
+                        style={{fontSize:10,fontWeight:700,padding:'4px 10px',borderRadius:8,border:'1px solid #e2e8f0',background:'#f8fafc',color:'#64748b',cursor:'pointer',transition:'all .1s'}}
+                        onMouseEnter={e=>{e.target.style.borderColor='#93c5fd';e.target.style.color='#2563eb';}}
+                        onMouseLeave={e=>{e.target.style.borderColor='#e2e8f0';e.target.style.color='#64748b';}}>
+                        {ex}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* 결과 리스트 */}
+            <div style={{gridColumn:'span 4'}}>
+              <div style={{marginBottom:10,padding:'0 4px'}}>
+                <h3 style={{fontSize:10,fontWeight:900,color:'#94a3b8',textTransform:'uppercase',letterSpacing:'2px',margin:0}}>Results ({results.length})</h3>
+              </div>
+              <div style={{display:'flex',flexDirection:'column',gap:10}}>
+                {results.length===0
+                  ?<div style={{padding:28,borderRadius:14,border:'2px dashed #e2e8f0',textAlign:'center',fontSize:12,color:'#94a3b8'}}>자연어로 조건을 입력하고<br/>AI 분석을 시작해 보세요.</div>
+                  :results.map(s=><StockCard key={s.code} s={s} selected={selected} onSelect={setSelected}/>)}
+              </div>
+            </div>
+
+            {/* 상세 패널 */}
+            <div style={{gridColumn:'span 8'}}>
+              {selected
+                ?<DetailPanel stock={selected} filters={filters} bookmarks={bookmarks} toggleBookmark={toggleBookmark} maVisible={maVisible} setMaVisible={setMaVisible} visibleRange={visibleRange} setVisibleRange={setVisibleRange}/>
+                :<div style={{height:560,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',border:'3px dashed #e2e8f0',borderRadius:22,background:'rgba(255,255,255,.5)',color:'#cbd5e1'}}>
+                  <Ic name="search" size={60} stroke="#e2e8f0"/>
+                  <p style={{fontWeight:900,fontSize:15,textTransform:'uppercase',letterSpacing:2,marginTop:16,opacity:.4}}>종목을 선택하면 분석 화면이 표시됩니다</p>
+                </div>}
+            </div>
+          </div>
+        ) : (
+          /* 마이페이지 */
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:32}}>
+            <div>
+              <h2 style={{fontSize:20,fontWeight:900,display:'flex',alignItems:'center',gap:10,color:'#0f172a',marginBottom:18}}>
+                <Ic name="history" size={20} stroke="#2563eb"/>최근 검색 기록
+              </h2>
+              {savedQueries.map(q=>(
+                <div key={q.id} style={{background:'#fff',padding:16,borderRadius:12,border:'2px solid #fff',boxShadow:'0 1px 3px rgba(0,0,0,.06)',display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8,transition:'border-color .15s',cursor:'pointer'}}
+                  onMouseEnter={e=>e.currentTarget.style.borderColor='#bfdbfe'}
+                  onMouseLeave={e=>e.currentTarget.style.borderColor='#fff'}>
+                  <div style={{flex:1}} onClick={()=>{setQuery(q.text);handleSearch(q.text);}}>
+                    <p style={{fontWeight:700,color:'#0f172a',fontSize:13,margin:0}}>{q.text}</p>
+                    <span style={{fontSize:10,fontWeight:900,color:'#94a3b8',textTransform:'uppercase',letterSpacing:1}}>{q.date}</span>
+                  </div>
+                  <button onClick={()=>setSavedQueries(prev=>prev.filter(s=>s.id!==q.id))} style={{background:'none',border:'none',cursor:'pointer',color:'#e2e8f0',padding:4,display:'flex',transition:'color .15s'}} onMouseEnter={e=>e.currentTarget.style.color='#ef4444'} onMouseLeave={e=>e.currentTarget.style.color='#e2e8f0'}><Ic name="trash" size={16} stroke="currentColor"/></button>
+                </div>
+              ))}
+            </div>
+            <div>
+              <h2 style={{fontSize:20,fontWeight:900,display:'flex',alignItems:'center',gap:10,color:'#0f172a',marginBottom:18}}>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="#2563eb" stroke="#2563eb" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>
+                관심 종목
+              </h2>
+              {bookmarks.length===0
+                ?<div style={{padding:24,borderRadius:12,border:'2px dashed #e2e8f0',textAlign:'center',fontSize:12,color:'#94a3b8'}}>검색 결과에서 ☆ 아이콘을 눌러 추가하세요.</div>
+                :bookmarks.map(s=>(
+                  <div key={s.code} style={{background:'#fff',padding:16,borderRadius:12,border:'2px solid #fff',boxShadow:'0 1px 3px rgba(0,0,0,.06)',display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8,transition:'border-color .15s'}}
+                    onMouseEnter={e=>e.currentTarget.style.borderColor='#bfdbfe'}
+                    onMouseLeave={e=>e.currentTarget.style.borderColor='#fff'}>
+                    <div style={{flex:1,cursor:'pointer'}} onClick={()=>{setSelected(s);setTab('search');}}>
+                      <div style={{display:'flex',alignItems:'center',gap:7,flexWrap:'wrap'}}>
+                        <span style={{fontWeight:900,fontSize:15}}>{s.name}</span>
+                        <span style={{fontSize:10,fontWeight:700,color:'#94a3b8',background:'#f8fafc',padding:'1px 6px',borderRadius:5}}>{s.code}</span>
+                        {s.market_cap_trillion&&<span style={{fontSize:10,fontWeight:700,color:'#7c3aed',background:'#f5f3ff',padding:'1px 6px',borderRadius:5}}>{s.market_cap_trillion.toFixed(1)}조</span>}
+                        {s.dividend_yield>0&&<span style={{fontSize:10,fontWeight:700,color:'#16a34a',background:'#f0fdf4',padding:'1px 6px',borderRadius:5}}>배당 {s.dividend_yield.toFixed(1)}%</span>}
+                      </div>
+                      <div style={{fontSize:10,fontWeight:900,color:'#2563eb',marginTop:2}}>Score: {s.buy_score}</div>
+                    </div>
+                    <div style={{display:'flex',alignItems:'center',gap:12}}>
+                      <div style={{textAlign:'right'}}>
+                        <div style={{fontWeight:900,color:'#0f172a'}}>{s.price.toLocaleString()}원</div>
+                        <div style={{fontSize:11,fontWeight:700,color:s.change>=0?'#ef4444':'#3b82f6'}}>{s.change>=0?'+':''}{s.change}%</div>
+                      </div>
+                      <button onClick={()=>toggleBookmark(s)} style={{background:'none',border:'none',cursor:'pointer',color:'#e2e8f0',display:'flex',transition:'color .15s'}} onMouseEnter={e=>e.currentTarget.style.color='#ef4444'} onMouseLeave={e=>e.currentTarget.style.color='#e2e8f0'}><Ic name="trash" size={16} stroke="currentColor"/></button>
+                    </div>
+                  </div>
+                ))}
+            </div>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

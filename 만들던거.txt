@@ -1,0 +1,356 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { Search, Filter, TrendingUp, AlertCircle, CheckCircle2, Loader2, BarChart3, X, Info, Star, Award, Zap, User, History, Bookmark, Trash2, ChevronRight, Activity } from 'lucide-react';
+
+// --- Mock Data: 섹터, 주도주, 점수 및 상세 내역 포함 ---
+const generateMockHistory = (basePrice, count = 150) => {
+  return Array.from({ length: count }, (_, i) => {
+    const change = (Math.random() - 0.5) * 0.04;
+    const close = basePrice * (1 + change);
+    return {
+      date: `2026-${String(Math.floor(i/30)+1).padStart(2, '0')}-${String((i%30)+1).padStart(2, '0')}`,
+      open: basePrice,
+      high: Math.max(basePrice, close) * (1 + Math.random() * 0.02),
+      low: Math.min(basePrice, close) * (1 - Math.random() * 0.02),
+      close: close,
+      volume: Math.floor(Math.random() * 3000000) + 200000
+    };
+  });
+};
+
+const MOCK_STOCKS = [
+  { 
+    code: "005930", name: "삼성전자", sector: "반도체",
+    is_leader: false, leader_name: "SK하이닉스",
+    buy_score: 74, rsi: 68, rsi_prev: 48, profit_growth_years: 3,
+    price: 72500, change: 1.2,
+    history: generateMockHistory(72500),
+    financials: { revenue: "302.2조", profit: "35.8조", roe: "12.5%", desc: "메모리 업황 회복세가 뚜렷하며 3년 연속 영업이익 우상향 기조 유지 중." }
+  },
+  { 
+    code: "000660", name: "SK하이닉스", sector: "반도체",
+    is_leader: true, leader_name: "SK하이닉스",
+    buy_score: 95, rsi: 72, rsi_prev: 60, profit_growth_years: 1,
+    price: 185000, change: -0.5,
+    history: generateMockHistory(185000),
+    financials: { revenue: "45.1조", profit: "8.2조", roe: "15.1%", desc: "HBM 시장 독점적 지위 확보로 섹터 내 가장 강력한 주도주 모멘텀 보유." }
+  },
+  { 
+    code: "005380", name: "현대차", sector: "자동차",
+    is_leader: true, leader_name: "현대차",
+    buy_score: 88, rsi: 58, rsi_prev: 45, profit_growth_years: 4,
+    price: 250000, change: 2.1,
+    history: generateMockHistory(250000),
+    financials: { revenue: "162.7조", profit: "15.1조", roe: "10.8%", desc: "하이브리드 및 전기차 믹스 개선으로 역대 최대 실적 경신 중." }
+  },
+  { 
+    code: "035420", name: "NAVER", sector: "인터넷",
+    is_leader: false, leader_name: "카카오",
+    buy_score: 62, rsi: 45, rsi_prev: 42, profit_growth_years: 2,
+    price: 192000, change: 0.5,
+    history: generateMockHistory(192000),
+    financials: { revenue: "9.6조", profit: "1.4조", roe: "8.2%", desc: "광고 및 커머스 성장세는 안정적이나 신사업 투자 비용 증가 추세." }
+  }
+];
+
+const App = () => {
+  const [activeTab, setActiveTab] = useState('search');
+  const [query, setQuery] = useState('');
+  const [isSearching, setIsSearching] = useState(false);
+  const [results, setResults] = useState([]);
+  const [activeFilters, setActiveFilters] = useState(null);
+  const [selectedStock, setSelectedStock] = useState(null);
+  const [error, setError] = useState(null);
+  const [maVisible, setMaVisible] = useState({ 5: true, 10: true, 20: true, 60: true, 120: false, 240: false });
+  const [visibleRange, setVisibleRange] = useState(40);
+  
+  const [savedQueries, setSavedQueries] = useState([
+    { id: 1, text: "RSI 60 이상, 영업이익 3년 연속 상승", date: "2026-04-18" },
+    { id: 2, text: "반도체 섹터 주도주 찾기", date: "2026-04-17" }
+  ]);
+  const [bookmarkedStocks, setBookmarkedStocks] = useState([]);
+
+  const apiKey = ""; 
+  const DATA_TIMESTAMP = "2026-04-19 15:30 KST (KRX 정규장 마감)";
+
+  const parseQueryWithGemini = async (userQuery) => {
+    const systemPrompt = `Convert stock filtering request into JSON. Fields: rsi {min, max}, profit_growth_years. Respond only in JSON. User Query: "${userQuery}"`;
+    try {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts: [{ text: systemPrompt }] }], generationConfig: { responseMimeType: "application/json" } })
+      });
+      const data = await response.json();
+      return JSON.parse(data.candidates[0].content.parts[0].text);
+    } catch (err) { throw new Error('해석 실패'); }
+  };
+
+  const handleSearch = async (targetQuery = query) => {
+    if (!targetQuery.trim()) return;
+    setIsSearching(true);
+    setError(null);
+    setActiveTab('search');
+    
+    try {
+      const filters = await parseQueryWithGemini(targetQuery);
+      setActiveFilters(filters);
+      const filtered = MOCK_STOCKS.filter(stock => {
+        if (filters.rsi?.min && stock.rsi < filters.rsi.min) return false;
+        if (filters.rsi?.max && stock.rsi > filters.rsi.max) return false;
+        if (filters.profit_growth_years && stock.profit_growth_years < filters.profit_growth_years) return false;
+        return true;
+      });
+      setResults(filtered);
+      if (!savedQueries.find(q => q.text === targetQuery)) {
+        setSavedQueries(prev => [{ id: Date.now(), text: targetQuery, date: new Date().toISOString().split('T')[0] }, ...prev]);
+      }
+    } catch (err) { setError("질문 해석 중 오류 발생"); }
+    finally { setIsSearching(false); }
+  };
+
+  const toggleBookmark = (stock) => {
+    if (bookmarkedStocks.find(s => s.code === stock.code)) {
+      setBookmarkedStocks(prev => prev.filter(s => s.code !== stock.code));
+    } else {
+      setBookmarkedStocks(prev => [...prev, stock]);
+    }
+  };
+
+  const deleteQuery = (id) => {
+    setSavedQueries(prev => prev.filter(q => q.id !== id));
+  };
+
+  // --- 차트 컴포넌트 ---
+  const StockChart = ({ stock, filters }) => {
+    const data = useMemo(() => stock.history.slice(-visibleRange), [stock, visibleRange]);
+    const width = 800; const height = 350; const padding = 50;
+    const volumeHeight = 60;
+    
+    const minP = Math.min(...data.map(d => d.low)) * 0.98;
+    const maxP = Math.max(...data.map(d => d.high)) * 1.02;
+    const maxV = Math.max(...data.map(d => d.volume));
+
+    const getX = (i) => padding + (i * (width - padding * 2) / (data.length - 1));
+    const getY = (p) => (height - padding - volumeHeight) - ((p - minP) / (maxP - minP) * (height - padding * 2 - volumeHeight));
+    const getVolY = (v) => height - padding - (v / maxV * volumeHeight);
+
+    const renderMA = (period, color) => {
+      if (!maVisible[period]) return null;
+      const points = data.map((_, i) => {
+        const fullIdx = stock.history.length - visibleRange + i;
+        if (fullIdx < period - 1) return null;
+        const slice = stock.history.slice(fullIdx - period + 1, fullIdx + 1);
+        const avg = slice.reduce((acc, curr) => acc + curr.close, 0) / period;
+        return `${getX(i)},${getY(avg)}`;
+      }).filter(p => p).join(' ');
+      return <polyline points={points} fill="none" stroke={color} strokeWidth="1.5" opacity="0.8" />;
+    };
+
+    return (
+      <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-inner">
+        <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
+          <div className="flex flex-wrap gap-3">
+            {[5, 10, 20, 60, 120, 240].map(p => (
+              <label key={p} className="flex items-center gap-1.5 cursor-pointer group">
+                <input 
+                  type="checkbox" 
+                  checked={maVisible[p]} 
+                  onChange={() => setMaVisible(prev => ({ ...prev, [p]: !prev[p] }))} 
+                  className="w-3.5 h-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500 transition-all"
+                />
+                <span className="text-xs font-semibold text-slate-500 group-hover:text-slate-800 transition-colors" 
+                  style={{ color: maVisible[p] ? (p === 5 ? '#f59e0b' : p === 20 ? '#ef4444' : p === 60 ? '#3b82f6' : '#64748b') : '' }}>
+                  {p}일선
+                </span>
+              </label>
+            ))}
+          </div>
+          <div className="flex items-center gap-3 bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-100 flex-1 max-w-[280px]">
+            <span className="text-[10px] font-bold text-slate-400 whitespace-nowrap uppercase tracking-tighter">범위 ({visibleRange}일)</span>
+            <input 
+              type="range" min="5" max="120" value={visibleRange} 
+              onChange={(e) => setVisibleRange(parseInt(e.target.value))} 
+              className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600" 
+            />
+          </div>
+        </div>
+
+        <div className="relative">
+          <svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`} className="overflow-visible select-none">
+            {[0, 1, 2, 3, 4].map(i => {
+              const val = minP + (maxP - minP) * (i / 4);
+              const y = getY(val);
+              return (
+                <g key={i}>
+                  <line x1={padding} y1={y} x2={width - padding} y2={y} stroke="#f1f5f9" strokeDasharray="4 4" />
+                  <text x={padding - 10} y={y} textAnchor="end" fontSize="10" fill="#94a3b8" alignmentBaseline="middle">{Math.round(val).toLocaleString()}</text>
+                </g>
+              );
+            })}
+            {data.map((d, i) => {
+              const x = getX(i);
+              const isUp = d.close >= d.open;
+              const color = isUp ? '#ef4444' : '#3b82f6';
+              return (
+                <g key={i}>
+                  <rect x={x - 3} y={getVolY(d.volume)} width="6" height={height - padding - getVolY(d.volume)} fill={color} opacity="0.2" />
+                  <line x1={x} y1={getY(d.high)} x2={x} y2={getY(d.low)} stroke={color} strokeWidth="1" />
+                  <rect x={x - 4} y={Math.min(getY(d.open), getY(d.close))} width="8" height={Math.max(1, Math.abs(getY(d.open) - getY(d.close)))} fill={color} />
+                </g>
+              );
+            })}
+            {renderMA(5, '#f59e0b')} {renderMA(20, '#ef4444')} {renderMA(60, '#3b82f6')} {renderMA(120, '#8b5cf6')} {renderMA(240, '#64748b')}
+            {filters?.rsi && (
+              <g transform={`translate(${width - padding - 120}, ${padding})`}>
+                <rect width="110" height="24" rx="4" fill="#3b82f6" />
+                <text x="55" y="16" textAnchor="middle" fontSize="11" fill="white" fontWeight="bold">RSI(14): {stock.rsi}</text>
+              </g>
+            )}
+          </svg>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans pb-12">
+      <nav className="bg-white border-b border-slate-200 sticky top-0 z-50 shadow-sm">
+        <div className="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">
+          <div className="flex items-center gap-3 font-black text-2xl text-blue-600 cursor-pointer tracking-tight" onClick={() => setActiveTab('search')}>
+            <TrendingUp strokeWidth={3} /> <span>STOCK<span className="text-slate-800">NLP</span></span>
+          </div>
+          <div className="flex gap-1.5 bg-slate-100 p-1.5 rounded-xl border border-slate-200">
+            <button onClick={() => setActiveTab('search')} className={`px-5 py-2 rounded-lg text-sm font-bold transition-all flex items-center gap-2 ${activeTab === 'search' ? 'bg-white shadow-md text-blue-600' : 'text-slate-500 hover:text-slate-800'}`}>
+              <Search className="w-4 h-4" /> 종목 검색
+            </button>
+            <button onClick={() => setActiveTab('mypage')} className={`px-5 py-2 rounded-lg text-sm font-bold transition-all flex items-center gap-2 ${activeTab === 'mypage' ? 'bg-white shadow-md text-blue-600' : 'text-slate-500 hover:text-slate-800'}`}>
+              <User className="w-4 h-4" /> 마이페이지
+            </button>
+          </div>
+        </div>
+      </nav>
+
+      <main className="max-w-7xl mx-auto px-4 mt-8">
+        {activeTab === 'search' ? (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+            <div className="lg:col-span-12">
+              <div className="bg-white rounded-3xl shadow-xl p-8 border border-slate-200 relative overflow-hidden">
+                <div className="absolute top-0 left-0 w-2 h-full bg-blue-600" />
+                <div className="flex justify-between items-center mb-6">
+                  <h2 className="text-xl font-bold flex items-center gap-2 text-slate-800"><Zap className="w-5 h-5 text-blue-600 fill-blue-600" /> 자연어 검색 필터</h2>
+                  <span className="text-xs text-slate-500 bg-slate-100 px-3 py-1 rounded-full font-semibold border border-slate-200">{DATA_TIMESTAMP}</span>
+                </div>
+                <textarea
+                  className="w-full h-24 p-5 bg-slate-50 border-2 border-slate-100 rounded-2xl focus:ring-4 focus:ring-blue-100 focus:border-blue-500 outline-none transition-all resize-none text-xl font-medium shadow-inner"
+                  placeholder="예: RSI 14기준 55~75 사이, 3년 연속 영업이익 상승 중인 섹터 주도주"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                />
+                <button onClick={() => handleSearch()} disabled={isSearching} className="mt-6 w-full md:w-auto px-12 bg-blue-600 hover:bg-blue-700 text-white py-4 rounded-2xl font-black text-lg shadow-lg active:scale-95 transition-all flex items-center justify-center gap-3 disabled:bg-slate-300">
+                  {isSearching ? <Loader2 className="animate-spin w-6 h-6" /> : <Activity className="w-6 h-6" />} AI 종목 분석 시작
+                </button>
+              </div>
+            </div>
+
+            <div className="lg:col-span-4 space-y-5">
+              <h3 className="font-black text-slate-400 text-xs uppercase tracking-widest px-2">Analysis Results ({results.length})</h3>
+              <div className="space-y-4">
+                {results.map(stock => (
+                  <div key={stock.code} onClick={() => setSelectedStock(stock)} className={`p-5 rounded-2xl border-2 transition-all cursor-pointer relative ${selectedStock?.code === stock.code ? 'border-blue-500 bg-blue-50 ring-4 ring-blue-100' : 'border-white bg-white hover:border-slate-200 shadow-sm'}`}>
+                    <div className="flex justify-between items-start mb-3">
+                      <div>
+                        <div className="font-black text-xl text-slate-800">{stock.name}</div>
+                        <div className="text-[10px] font-bold text-slate-400 uppercase">{stock.code} · {stock.sector}</div>
+                      </div>
+                      <div className="text-xs font-black text-blue-600 bg-blue-100 px-2 py-1 rounded-lg">STRG {stock.buy_score}</div>
+                    </div>
+                    <div className="flex justify-between items-end">
+                      <div className="flex gap-1.5">
+                        {stock.is_leader && <span className="text-[10px] bg-yellow-400 text-white px-2 py-0.5 rounded-full font-black">주도주</span>}
+                        {stock.profit_growth_years >= 3 && <span className="text-[10px] bg-green-500 text-white px-2 py-0.5 rounded-full font-black">성장형</span>}
+                      </div>
+                      <div className="text-right">
+                        <div className="font-black text-lg text-slate-900">{stock.price.toLocaleString()}원</div>
+                        <div className={`text-xs font-bold ${stock.change >= 0 ? 'text-red-500' : 'text-blue-500'}`}>{stock.change >= 0 ? '▲' : '▼'} {Math.abs(stock.change)}%</div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="lg:col-span-8">
+              {selectedStock ? (
+                <div className="bg-white rounded-3xl border border-slate-200 shadow-xl p-8 sticky top-24 overflow-hidden">
+                  <div className="flex justify-between items-start mb-8">
+                    <div className="flex items-center gap-4">
+                      <div className="w-14 h-14 bg-slate-900 rounded-2xl flex items-center justify-center text-white font-black text-xl">{selectedStock.name[0]}</div>
+                      <div>
+                        <div className="flex items-center gap-3">
+                          <h2 className="text-3xl font-black text-slate-900">{selectedStock.name}</h2>
+                          <button onClick={() => toggleBookmark(selectedStock)}><Bookmark className={`w-7 h-7 ${bookmarkedStocks.find(s => s.code === selectedStock.code) ? 'fill-yellow-400 text-yellow-400' : 'text-slate-200'}`} /></button>
+                        </div>
+                        <div className="text-xs font-bold text-slate-400 mt-1">{selectedStock.sector} 섹터 상세 분석 · {selectedStock.code}</div>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Recommendation Score</div>
+                      <div className="flex items-baseline gap-1"><span className="text-5xl font-black text-blue-600">{selectedStock.buy_score}</span><span className="text-xl font-bold text-slate-300">/100</span></div>
+                    </div>
+                  </div>
+                  <StockChart stock={selectedStock} filters={activeFilters} />
+                  <div className="mt-8 grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <div className="p-5 rounded-2xl border-2 bg-slate-50 border-slate-100">
+                      <h3 className="font-black text-slate-800 flex items-center gap-2 text-sm mb-4"><Award className="w-4 h-4 text-yellow-500 fill-yellow-500" /> 섹터 내 위상 분석</h3>
+                      {selectedStock.is_leader ? <p className="text-xs text-yellow-700 leading-relaxed font-bold underline decoration-yellow-300 decoration-2">현재 섹터 주도 대장주입니다.</p> : <p className="text-xs text-slate-500 leading-relaxed">섹터 내 주도주: <span className="text-blue-600 font-bold">{selectedStock.leader_name}</span></p>}
+                    </div>
+                    <div className="bg-slate-900 text-white p-6 rounded-2xl">
+                      <h3 className="font-black flex items-center gap-2 text-sm mb-4"><BarChart3 className="w-4 h-4 text-blue-500" /> DART 재무 요약</h3>
+                      <div className="grid grid-cols-3 gap-2 mb-4 text-center">
+                        <div className="bg-slate-800 p-2 rounded text-[10px]"><div className="text-slate-500 uppercase">Revenue</div><div className="font-bold">{selectedStock.financials.revenue}</div></div>
+                        <div className="bg-slate-800 p-2 rounded text-[10px]"><div className="text-slate-500 uppercase">Profit</div><div className="font-bold text-orange-400">{selectedStock.financials.profit}</div></div>
+                        <div className="bg-slate-800 p-2 rounded text-[10px]"><div className="text-slate-500 uppercase">ROE</div><div className="font-bold text-green-400">{selectedStock.financials.roe}</div></div>
+                      </div>
+                      <p className="text-xs leading-relaxed text-slate-400 italic">"{selectedStock.financials.desc}"</p>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="h-[600px] flex flex-col items-center justify-center border-4 border-dashed border-slate-200 rounded-3xl text-slate-300 bg-white/50"><Search className="w-20 h-20 mb-6 opacity-5" /><p className="font-black text-xl uppercase tracking-widest opacity-20">Select a Stock for Analysis</p></div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
+            <div className="space-y-6">
+              <h2 className="text-2xl font-black flex items-center gap-3 text-slate-800"><History className="text-blue-600" /> 최근 검색 기록</h2>
+              {savedQueries.map(q => (
+                <div key={q.id} className="bg-white p-5 rounded-2xl border-2 border-white hover:border-blue-200 shadow-sm transition-all flex justify-between items-center group">
+                  <div className="cursor-pointer flex-1" onClick={() => { setQuery(q.text); handleSearch(q.text); }}>
+                    <p className="font-bold text-slate-700 group-hover:text-blue-600 transition-colors">{q.text}</p>
+                    <span className="text-[10px] font-black text-slate-300 uppercase tracking-widest">{q.date}</span>
+                  </div>
+                  <button onClick={() => deleteQuery(q.id)} className="text-slate-200 hover:text-red-500 p-2"><Trash2 className="w-5 h-5" /></button>
+                </div>
+              ))}
+            </div>
+            <div className="space-y-6">
+              <h2 className="text-2xl font-black flex items-center gap-3 text-slate-800"><Bookmark className="text-blue-600" fill="currentColor" /> 관심 종목 라이브러리</h2>
+              {bookmarkedStocks.map(stock => (
+                <div key={stock.code} className="bg-white p-5 rounded-2xl border-2 border-white hover:border-blue-200 shadow-sm transition-all flex justify-between items-center">
+                  <div className="cursor-pointer flex-1" onClick={() => { setSelectedStock(stock); setActiveTab('search'); }}>
+                    <div className="flex items-center gap-2"><span className="font-black text-lg">{stock.name}</span><span className="text-[10px] font-bold text-slate-400 bg-slate-50 px-1.5 py-0.5 rounded">{stock.code}</span></div>
+                    <div className="text-[10px] font-black text-blue-500 uppercase mt-1">Score: {stock.buy_score}</div>
+                  </div>
+                  <div className="flex items-center gap-6"><div className="text-right"><div className="font-black text-slate-900">{stock.price.toLocaleString()}원</div><div className={`text-[10px] font-black ${stock.change >= 0 ? 'text-red-500' : 'text-blue-500'}`}>{stock.change}%</div></div><button onClick={() => toggleBookmark(stock)} className="text-slate-200 hover:text-red-500"><Trash2 className="w-5 h-5" /></button></div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+};
+
+export default App;
