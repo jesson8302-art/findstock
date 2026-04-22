@@ -32,6 +32,9 @@ Convert the user's natural language request into a JSON object with these option
 - sector: string (one of 반도체, 자동차, 인터넷, 바이오, 2차전지, 금융, 화학, 철강, 통신, 건설, 유통, 엔터, 게임, 기타)
 - market_cap_trillion_min: number (minimum market cap in trillion KRW)
 - dividend_yield_min: number (minimum dividend yield in %)
+- change_pct_min: number (minimum daily price change %, e.g. 5 means stocks up 5% or more, 20 means up 20%+)
+- change_pct_max: number (maximum daily price change %)
+- target_date: string YYYY-MM-DD (convert Korean date expressions to this format, current year is 2026. Examples: "4월6일"→"2026-04-06", "4/21"→"2026-04-21", "어제"→yesterday's date)
 
 Return ONLY a valid JSON object. Omit keys if not specified.
 """

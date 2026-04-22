@@ -339,6 +339,113 @@ def list_commodities() -> dict[str, Any]:
     }
 
 
+def _format_stock_row(r: dict[str, Any]) -> dict[str, Any]:
+    raw_fin = r.get("financials") or {}
+    financials = {
+        "revenue": raw_fin.get("revenue") or "-",
+        "profit":  raw_fin.get("profit")  or "-",
+        "roe":     raw_fin.get("roe")      or "-",
+        "desc":    raw_fin.get("desc")     or "",
+    }
+    mkt_cap   = r.get("market_cap_trillion")
+    div_yield = r.get("dividend_yield")
+    return {
+        "code":                r["code"],
+        "name":                r["name"],
+        "sector":              r.get("sector") or "기타",
+        "is_leader":           bool(r.get("is_leader")),
+        "leader_name":         r.get("leader_name") or r["name"],
+        "buy_score":           int(r.get("buy_score") or 0),
+        "rsi":                 int(r.get("rsi") or 50),
+        "rsi_prev":            int(r.get("rsi_prev") or 50),
+        "profit_growth_years": int(r.get("profit_growth_years") or 0),
+        "price":               int(r.get("close_price") or 0),
+        "change":              float(r.get("change_pct") or 0),
+        "market_cap_trillion": round(float(mkt_cap), 2) if mkt_cap else None,
+        "dividend_yield":      round(float(div_yield), 2) if div_yield else None,
+        "history":             [],
+        "financials":          financials,
+    }
+
+
+def _search_by_date_change(
+    target_date: str,
+    change_min: float | None,
+    change_max: float | None,
+    extra_filters: dict[str, Any],
+) -> list[dict[str, Any]] | None:
+    """특정 날짜의 등락률 기준 종목 검색. stock_prices에서 전일대비 변화율 계산."""
+    sb = _supabase_or_none()
+    if sb is None:
+        return None
+    try:
+        # 직전 거래일 찾기
+        prev_rows = (
+            sb.table("stock_prices").select("date")
+            .lt("date", target_date).order("date", desc=True).limit(1)
+            .execute().data or []
+        )
+        if not prev_rows:
+            return []
+        prev_date = prev_rows[0]["date"]
+
+        # 대상 날짜 + 직전 거래일 종가 가져오기
+        today_prices = (
+            sb.table("stock_prices").select("code, close")
+            .eq("date", target_date).limit(5000).execute().data or []
+        )
+        if not today_prices:
+            return []  # 해당 날짜 데이터 없음 (휴장일 등)
+
+        prev_prices = (
+            sb.table("stock_prices").select("code, close")
+            .eq("date", prev_date).limit(5000).execute().data or []
+        )
+        prev_close_map = {r["code"]: float(r["close"]) for r in prev_prices if r.get("close")}
+
+        # 등락률 계산 후 필터링
+        matching_codes = []
+        for r in today_prices:
+            code  = r["code"]
+            close = float(r.get("close") or 0)
+            pc    = prev_close_map.get(code)
+            if not pc or pc <= 0:
+                continue
+            change = (close - pc) / pc * 100
+            if change_min is not None and change < change_min:
+                continue
+            if change_max is not None and change > change_max:
+                continue
+            matching_codes.append(code)
+
+        if not matching_codes:
+            return []
+
+        # 매칭 종목 상세 정보 조회
+        results = []
+        for i in range(0, len(matching_codes), 100):
+            batch = matching_codes[i:i + 100]
+            q = (
+                sb.table("stocks")
+                .select("code, name, sector, is_leader, leader_name, buy_score, "
+                        "rsi, rsi_prev, profit_growth_years, close_price, change_pct, "
+                        "market_cap_trillion, dividend_yield, financials")
+                .in_("code", batch)
+            )
+            if extra_filters.get("sector"):
+                q = q.eq("sector", extra_filters["sector"])
+            if extra_filters.get("is_leader") is True:
+                q = q.eq("is_leader", True)
+            rows = q.execute().data or []
+            results.extend(_format_stock_row(r) for r in rows)
+
+        results.sort(key=lambda s: s["buy_score"], reverse=True)
+        return results
+    except Exception as e:
+        print(f"[date_change_search] failed: {e}")
+        return None
+
+
 def _search_stocks_from_db(f: dict[str, Any]) -> list[dict[str, Any]] | None:
     """Supabase 쿼리 레벨에서 필터 적용 → 전체 2,891개 종목 대상 검색."""
     sb = _supabase_or_none()
@@ -371,38 +478,14 @@ def _search_stocks_from_db(f: dict[str, Any]) -> list[dict[str, Any]] | None:
         # 배당수익률 최솟값
         if f.get("dividend_yield_min") is not None:
             q = q.gte("dividend_yield", f["dividend_yield_min"])
+        # 당일 등락률 (날짜 미지정 시 stocks.change_pct 기준)
+        if f.get("change_pct_min") is not None:
+            q = q.gte("change_pct", f["change_pct_min"])
+        if f.get("change_pct_max") is not None:
+            q = q.lte("change_pct", f["change_pct_max"])
 
         rows = q.order("buy_score", desc=True).limit(200).execute().data or []
-
-        results = []
-        for r in rows:
-            raw_fin = r.get("financials") or {}
-            financials = {
-                "revenue": raw_fin.get("revenue") or "-",
-                "profit":  raw_fin.get("profit")  or "-",
-                "roe":     raw_fin.get("roe")      or "-",
-                "desc":    raw_fin.get("desc")     or "",
-            }
-            mkt_cap   = r.get("market_cap_trillion")
-            div_yield = r.get("dividend_yield")
-            results.append({
-                "code":                r["code"],
-                "name":                r["name"],
-                "sector":              r.get("sector") or "기타",
-                "is_leader":           bool(r.get("is_leader")),
-                "leader_name":         r.get("leader_name") or r["name"],
-                "buy_score":           int(r.get("buy_score") or 0),
-                "rsi":                 int(r.get("rsi") or 50),
-                "rsi_prev":            int(r.get("rsi_prev") or 50),
-                "profit_growth_years": int(r.get("profit_growth_years") or 0),
-                "price":               int(r.get("close_price") or 0),
-                "change":              float(r.get("change_pct") or 0),
-                "market_cap_trillion": round(float(mkt_cap), 2) if mkt_cap else None,
-                "dividend_yield":      round(float(div_yield), 2) if div_yield else None,
-                "history":             [],
-                "financials":          financials,
-            })
-        return results
+        return [_format_stock_row(r) for r in rows]
     except Exception as e:
         print(f"[search] DB search failed: {e}")
         return None
@@ -411,10 +494,25 @@ def _search_stocks_from_db(f: dict[str, Any]) -> list[dict[str, Any]] | None:
 @app.post("/api/search")
 def search(body: QueryBody) -> dict[str, Any]:
     filters = gemini_parse(body.query)
-    # DB 레벨 필터링 (전체 종목 대상)
-    results = _search_stocks_from_db(filters)
-    if results is None:
-        # DB 없으면 mock에서 Python 필터링
-        results = _apply_filters(_MOCK_STOCKS, filters)
-        results.sort(key=lambda s: s["buy_score"], reverse=True)
-    return {"filters": filters, "results": results, "count": len(results)}
+
+    target_date  = filters.get("target_date")
+    change_min   = filters.get("change_pct_min")
+    change_max   = filters.get("change_pct_max")
+
+    # 날짜 지정 시 stock_prices 기반 등락률 검색
+    if target_date and (change_min is not None or change_max is not None):
+        results = _search_by_date_change(target_date, change_min, change_max, filters)
+        if results is None:
+            results = []
+        note = f"{target_date} 기준 등락률 검색"
+    else:
+        results = _search_stocks_from_db(filters)
+        if results is None:
+            results = _apply_filters(_MOCK_STOCKS, filters)
+            results.sort(key=lambda s: s["buy_score"], reverse=True)
+        note = None
+
+    resp: dict[str, Any] = {"filters": filters, "results": results, "count": len(results)}
+    if note:
+        resp["note"] = note
+    return resp
