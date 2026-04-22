@@ -5,10 +5,11 @@
   - 하드코딩 43개 → 공공데이터포털에서 전체 상장 종목 자동 수집
 
 실행 예시:
-    python data_collector.py --seed          # 최초 1회 전체 적재 (약 30분)
-    python data_collector.py --daily         # 매일 최신 업데이트
-    python data_collector.py --reindex       # RSI/buy_score 재계산만
-    python data_collector.py --dart          # DART 재무 갱신 (선택)
+    python data_collector.py --seed            # 최초 1회 전체 적재 (약 30분)
+    python data_collector.py --daily           # 매일 최신 업데이트
+    python data_collector.py --reindex         # RSI/buy_score 재계산만
+    python data_collector.py --update-sectors  # Gemini로 전체 종목 섹터 자동 분류 (~10분)
+    python data_collector.py --dart            # DART 재무 갱신 (선택)
 """
 from __future__ import annotations
 
@@ -34,6 +35,14 @@ DART_API_KEY    = os.getenv("DART_API_KEY", "")
 
 _BASE = "http://apis.data.go.kr/1160100/service"
 PRICE_API = f"{_BASE}/GetStockSecuritiesInfoService/getStockPriceInfo"
+
+# 전체 섹터 목록 (기타 최소화)
+SECTOR_LIST = [
+    "반도체", "자동차", "2차전지", "인터넷", "바이오", "금융",
+    "화학", "철강", "통신", "건설", "유통", "엔터", "게임",
+    "방산", "조선", "기계장비", "에너지", "음식료", "의료기기",
+    "소프트웨어", "의류패션", "운송물류", "부동산", "기타",
+]
 
 # ── 섹터 + 주도주 curated 매핑 (알려진 종목만, 나머지는 "기타") ──────────────
 STOCK_META: dict[str, dict[str, Any]] = {
@@ -475,22 +484,127 @@ def cmd_dart() -> None:
     print("[dart] 완료 ✓")
 
 
+def _gemini_classify_batch(batch: list[dict]) -> dict[str, str]:
+    """Gemini로 종목 배치 → {code: sector} 반환."""
+    import json as _json
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        return {}
+
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        return {}
+
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(
+        os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
+        generation_config={"response_mime_type": "application/json"},
+    )
+
+    names_str = "\n".join(f"{s['code']}: {s['name']}" for s in batch)
+    prompt = f"""한국 증권거래소(KOSPI/KOSDAQ) 상장 종목들을 아래 섹터 중 하나로 분류하세요.
+모르거나 해당 없으면 "기타"로 분류하세요.
+
+섹터 목록: {", ".join(SECTOR_LIST)}
+
+종목 (코드: 이름):
+{names_str}
+
+JSON으로만 응답 (다른 말 없이): {{"종목코드": "섹터명", ...}}"""
+
+    try:
+        resp = model.generate_content(prompt)
+        result = _json.loads(resp.text or "{}")
+        # 유효한 섹터만 허용
+        return {k: v for k, v in result.items() if v in SECTOR_LIST}
+    except Exception as e:
+        print(f" [Gemini 오류] {e}")
+        return {}
+
+
+def cmd_update_sectors() -> None:
+    """Gemini AI로 전체 종목 섹터 자동 분류 후 Supabase 업데이트."""
+    sb = _supabase()
+
+    print(f"\n{'='*60}")
+    print("[update-sectors] 전체 종목 섹터 AI 분류 시작")
+    print(f"{'='*60}\n")
+
+    # 1. 전체 종목 목록 가져오기
+    all_stocks = sb.table("stocks").select("code, name").execute().data or []
+    total = len(all_stocks)
+    print(f"대상: {total:,}개 종목\n")
+
+    # 2. Gemini 배치 분류 (80개씩)
+    BATCH = 80
+    all_updates: dict[str, str] = {}
+    total_batches = (total + BATCH - 1) // BATCH
+
+    for i in range(0, total, BATCH):
+        batch = all_stocks[i:i + BATCH]
+        batch_num = i // BATCH + 1
+        print(f"  [{batch_num:02d}/{total_batches}] {batch[0]['name']} ~ {batch[-1]['name']} ...", end=" ", flush=True)
+
+        result = _gemini_classify_batch(batch)
+        all_updates.update(result)
+
+        other_cnt = sum(1 for v in result.values() if v == "기타")
+        print(f"✓ {len(result)}개 (기타: {other_cnt}개)")
+
+        time.sleep(4.5)  # 15 RPM 제한 준수
+
+    # STOCK_META 매핑으로 덮어쓰기 (curated 데이터 우선)
+    for code, meta in STOCK_META.items():
+        all_updates[code] = meta["sector"]
+
+    print(f"\n  → 총 {len(all_updates):,}개 섹터 확정\n")
+
+    # 3. Supabase 벌크 업데이트 (code + sector만)
+    print("[update-sectors] Supabase 업데이트 중...")
+    update_rows = [
+        {"code": code, "sector": sector}
+        for code, sector in all_updates.items()
+    ]
+
+    for j in range(0, len(update_rows), 500):
+        batch = update_rows[j:j + 500]
+        sb.table("stocks").upsert(batch, on_conflict="code").execute()
+        done = min(j + 500, len(update_rows))
+        print(f"  {done:,}/{len(update_rows):,} ...", end="\r")
+
+    print(f"  ✓ {len(update_rows):,}개 완료           ")
+
+    # 섹터별 집계 출력
+    print("\n[섹터 분포]")
+    from collections import Counter
+    counts = Counter(all_updates.values())
+    for sector, cnt in counts.most_common():
+        print(f"  {sector:12s}: {cnt:,}개")
+
+    print(f"\n{'='*60}")
+    print("[update-sectors] 완료 ✓")
+    print(f"{'='*60}\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="StockNLP 데이터 수집기 (전체 상장 종목)")
-    parser.add_argument("--seed",    action="store_true", help="최초 1회 전체 적재")
-    parser.add_argument("--daily",   action="store_true", help="매일 최신 업데이트")
-    parser.add_argument("--reindex", action="store_true", help="RSI/buy_score 재계산만")
-    parser.add_argument("--dart",    action="store_true", help="DART 재무 갱신")
-    parser.add_argument("--days",    type=int, default=35, help="수집 기간 (기본 35 영업일)")
+    parser.add_argument("--seed",           action="store_true", help="최초 1회 전체 적재")
+    parser.add_argument("--daily",          action="store_true", help="매일 최신 업데이트")
+    parser.add_argument("--reindex",        action="store_true", help="RSI/buy_score 재계산만")
+    parser.add_argument("--update-sectors", action="store_true", help="Gemini로 전체 종목 섹터 자동 분류")
+    parser.add_argument("--dart",           action="store_true", help="DART 재무 갱신")
+    parser.add_argument("--days",           type=int, default=35, help="수집 기간 (기본 35 영업일)")
     args = parser.parse_args()
 
     _require_env(for_dart=args.dart)
 
-    if   args.seed:    cmd_seed(days=args.days)
-    elif args.daily:   cmd_daily()
-    elif args.reindex: cmd_reindex()
-    elif args.dart:    cmd_dart()
+    if   args.seed:                        cmd_seed(days=args.days)
+    elif args.daily:                       cmd_daily()
+    elif args.reindex:                     cmd_reindex()
+    elif getattr(args, "update_sectors"):  cmd_update_sectors()
+    elif args.dart:                        cmd_dart()
     else:
         parser.print_help()
         print("\n예시: python data_collector.py --seed")
