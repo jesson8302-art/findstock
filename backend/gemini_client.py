@@ -45,9 +45,36 @@ KNOWN_SECTORS = [
 ]
 
 
+def _parse_korean_date(text: str) -> str | None:
+    """한국어 날짜 표현을 YYYY-MM-DD 로 변환."""
+    from datetime import date, timedelta
+    today = date.today()
+    year = today.year
+
+    # "어제"
+    if "어제" in text:
+        return (today - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # "4/21", "4-21"
+    m = re.search(r"(\d{1,2})[/\-](\d{1,2})", text)
+    if m:
+        month, day = int(m.group(1)), int(m.group(2))
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            return f"{year}-{month:02d}-{day:02d}"
+
+    # "4월21일", "4월 21일"
+    m = re.search(r"(\d{1,2})월\s*(\d{1,2})일", text)
+    if m:
+        month, day = int(m.group(1)), int(m.group(2))
+        return f"{year}-{month:02d}-{day:02d}"
+
+    return None
+
+
 def _local_parse(text: str) -> dict[str, Any]:
     filters: dict[str, Any] = {}
 
+    # RSI
     m = re.search(r"RSI[^\d]*(\d{1,3})\s*[~\-–]\s*(\d{1,3})", text, re.IGNORECASE)
     if m:
         filters["rsi"] = {"min": int(m.group(1)), "max": int(m.group(2))}
@@ -62,6 +89,32 @@ def _local_parse(text: str) -> dict[str, Any]:
         if rsi_range:
             filters["rsi"] = rsi_range
 
+    # 날짜
+    target_date = _parse_korean_date(text)
+    if target_date:
+        filters["target_date"] = target_date
+
+    # 등락률 범위: "20~25% 상승", "20~25%"
+    m = re.search(r"(\d+(?:\.\d+)?)\s*[~\-–]\s*(\d+(?:\.\d+)?)\s*%", text)
+    if m:
+        lo, hi = float(m.group(1)), float(m.group(2))
+        # 상승/하락 방향 판단
+        if "하락" in text or "하방" in text or "떨어" in text:
+            filters["change_pct_min"] = -hi
+            filters["change_pct_max"] = -lo
+        else:
+            filters["change_pct_min"] = lo
+            filters["change_pct_max"] = hi
+    else:
+        # "5% 이상 상승"
+        m_up = re.search(r"(\d+(?:\.\d+)?)\s*%\s*이상\s*(?:상승|올|급등)?", text)
+        if m_up and "하락" not in text:
+            filters["change_pct_min"] = float(m_up.group(1))
+        m_dn = re.search(r"(\d+(?:\.\d+)?)\s*%\s*이상\s*(?:하락|떨어|급락)?", text)
+        if m_dn and "하락" in text:
+            filters["change_pct_min"] = -float(m_dn.group(1))
+
+    # 연속 성장
     pg = re.search(r"(\d+)\s*년.*(영업이익|이익)", text)
     if pg:
         filters["profit_growth_years"] = int(pg.group(1))
