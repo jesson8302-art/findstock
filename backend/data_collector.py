@@ -463,6 +463,15 @@ def cmd_reindex() -> None:
     print(f"[reindex] 완료 ✓")
 
 
+def cmd_cleanup(keep_days: int = 365) -> None:
+    """1년(365일) 이전 stock_prices 데이터 삭제."""
+    sb = _supabase()
+    cutoff = (date.today() - timedelta(days=keep_days)).strftime("%Y-%m-%d")
+    print(f"[cleanup] {cutoff} 이전 데이터 삭제 중...")
+    result = sb.table("stock_prices").delete().lt("date", cutoff).execute()
+    print(f"[cleanup] 완료 ✓ (기준일: {cutoff})")
+
+
 def cmd_dart() -> None:
     """DART API로 재무 데이터 갱신."""
     sb     = _supabase()
@@ -560,20 +569,23 @@ def cmd_update_sectors() -> None:
 
     print(f"\n  → 총 {len(all_updates):,}개 섹터 확정\n")
 
-    # 3. Supabase 벌크 업데이트 (code + sector만)
+    # 3. 섹터별로 묶어서 UPDATE (upsert 대신 update + in_ 필터)
     print("[update-sectors] Supabase 업데이트 중...")
-    update_rows = [
-        {"code": code, "sector": sector}
-        for code, sector in all_updates.items()
-    ]
+    from collections import defaultdict
+    sector_to_codes: dict[str, list[str]] = defaultdict(list)
+    for code, sector in all_updates.items():
+        sector_to_codes[sector].append(code)
 
-    for j in range(0, len(update_rows), 500):
-        batch = update_rows[j:j + 500]
-        sb.table("stocks").upsert(batch, on_conflict="code").execute()
-        done = min(j + 500, len(update_rows))
-        print(f"  {done:,}/{len(update_rows):,} ...", end="\r")
+    total_updated = 0
+    for sector, codes in sector_to_codes.items():
+        # 500개씩 나눠서 IN 필터로 UPDATE
+        for j in range(0, len(codes), 500):
+            batch_codes = codes[j:j + 500]
+            sb.table("stocks").update({"sector": sector}).in_("code", batch_codes).execute()
+            total_updated += len(batch_codes)
+        print(f"  {sector:12s}: {len(codes):,}개 ✓")
 
-    print(f"  ✓ {len(update_rows):,}개 완료           ")
+    print(f"\n  총 {total_updated:,}개 업데이트 완료")
 
     # 섹터별 집계 출력
     print("\n[섹터 분포]")
@@ -594,6 +606,7 @@ def main() -> None:
     parser.add_argument("--daily",          action="store_true", help="매일 최신 업데이트")
     parser.add_argument("--reindex",        action="store_true", help="RSI/buy_score 재계산만")
     parser.add_argument("--update-sectors", action="store_true", help="Gemini로 전체 종목 섹터 자동 분류")
+    parser.add_argument("--cleanup",        action="store_true", help="1년 이전 시세 데이터 삭제")
     parser.add_argument("--dart",           action="store_true", help="DART 재무 갱신")
     parser.add_argument("--days",           type=int, default=35, help="수집 기간 (기본 35 영업일)")
     args = parser.parse_args()
@@ -604,6 +617,7 @@ def main() -> None:
     elif args.daily:                       cmd_daily()
     elif args.reindex:                     cmd_reindex()
     elif getattr(args, "update_sectors"):  cmd_update_sectors()
+    elif args.cleanup:                     cmd_cleanup()
     elif args.dart:                        cmd_dart()
     else:
         parser.print_help()

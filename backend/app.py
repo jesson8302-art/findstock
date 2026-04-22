@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from contextlib import asynccontextmanager
 
 from gemini_client import parse_query as gemini_parse
 
@@ -109,9 +110,38 @@ for _s in _MOCK_STOCKS:
     _s["history"] = _generate_mock_history(_s["price"])
 
 
+# --- 자동 스케줄러 (매일 18:30 KST = 09:30 UTC) -------------------------
+
+def _run_daily_job() -> None:
+    """매일 시세 업데이트 + 1년 이전 데이터 삭제."""
+    try:
+        print("[scheduler] 일일 업데이트 시작")
+        from data_collector import cmd_daily, cmd_cleanup
+        cmd_daily()
+        cmd_cleanup(keep_days=365)
+        print("[scheduler] 일일 업데이트 완료 ✓")
+    except Exception as e:
+        print(f"[scheduler] 오류: {e}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        from apscheduler.schedulers.background import BackgroundScheduler
+        from apscheduler.triggers.cron import CronTrigger
+        scheduler = BackgroundScheduler(timezone="UTC")
+        # 매일 09:30 UTC = 18:30 KST (장 마감 후)
+        scheduler.add_job(_run_daily_job, CronTrigger(hour=9, minute=30))
+        scheduler.start()
+        print("[scheduler] 일일 스케줄러 시작 (매일 18:30 KST)")
+    except ImportError:
+        print("[scheduler] apscheduler 미설치 — 스케줄러 비활성화")
+    yield
+
+
 # --- FastAPI 앱 ---------------------------------------------------------
 
-app = FastAPI(title="StockNLP API", version="0.1.0")
+app = FastAPI(title="StockNLP API", version="0.1.0", lifespan=lifespan)
 
 # 프로덕션: CORS_ORIGINS 환경변수에 Netlify URL 추가 (콤마 구분)
 # 예) CORS_ORIGINS=https://stocknlp.netlify.app,https://your-domain.com
