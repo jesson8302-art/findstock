@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   Search, TrendingUp, AlertCircle, Loader2, BarChart3, Zap,
   User, History, Bookmark, Trash2, Activity, Award, ChevronRight,
-  TrendingDown, Minus,
+  TrendingDown, Minus, FileText, ExternalLink,
 } from 'lucide-react';
 import { MOCK_STOCKS, MOCK_INDICES, MOCK_COMMODITIES } from './data/mockStocks.js';
 import { api } from './lib/api.js';
@@ -90,6 +90,16 @@ const FilterBadges = ({ filters }) => {
   if (filters.sector) badges.push(`${filters.sector} 섹터`);
   if (filters.market_cap_trillion_min) badges.push(`시총 ${filters.market_cap_trillion_min}조↑`);
   if (filters.dividend_yield_min) badges.push(`배당 ${filters.dividend_yield_min}%↑`);
+  if (filters.per_max != null) badges.push(`PER ≤ ${filters.per_max}`);
+  if (filters.per_min != null) badges.push(`PER ≥ ${filters.per_min}`);
+  if (filters.pbr_max != null) badges.push(`PBR ≤ ${filters.pbr_max}`);
+  if (filters.roe_min != null) badges.push(`ROE ≥ ${filters.roe_min}%`);
+  if (filters.sort_by === 'per') badges.push('PER 낮은순');
+  if (filters.sort_by === 'roe') badges.push('ROE 높은순');
+  if (filters.disclosure_type) {
+    const days = filters.disclosure_days || 30;
+    badges.push(`[${filters.disclosure_type}] 공시있는종목 (최근 ${days}일)`);
+  }
   if (badges.length === 0) return null;
 
   return (
@@ -290,9 +300,98 @@ const StockChart = ({ stock, filters, maVisible, setMaVisible, visibleRange, set
 };
 
 // ──────────────────────────────────────────────────────────────────────────
+// DartFinancialPanel — 4년치 재무 테이블
+// ──────────────────────────────────────────────────────────────────────────
+const DartFinancialPanel = ({ dartData, dartLoading }) => {
+  if (dartLoading) {
+    return (
+      <div className="p-5 rounded-2xl border border-slate-100 bg-slate-50 flex items-center gap-3">
+        <Loader2 className="animate-spin w-4 h-4 text-blue-400 shrink-0" />
+        <span className="text-xs text-slate-400">DART 실시간 재무 데이터 로딩 중...</span>
+      </div>
+    );
+  }
+  if (!dartData || !dartData.yearly || dartData.yearly.length === 0) return null;
+
+  return (
+    <div className="p-5 rounded-2xl border border-slate-200 bg-white">
+      <h3 className="font-black text-slate-800 flex items-center gap-2 text-sm mb-3">
+        <BarChart3 className="w-4 h-4 text-blue-500" /> DART 연간 재무 (실시간)
+      </h3>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b border-slate-100">
+              <th className="text-left py-1.5 px-2 text-slate-400 font-bold">연도</th>
+              <th className="text-right py-1.5 px-2 text-slate-400 font-bold">매출</th>
+              <th className="text-right py-1.5 px-2 text-slate-400 font-bold">영업이익</th>
+              <th className="text-right py-1.5 px-2 text-slate-400 font-bold">당기순이익</th>
+              <th className="text-right py-1.5 px-2 text-slate-400 font-bold">ROE</th>
+            </tr>
+          </thead>
+          <tbody>
+            {dartData.yearly.map((row) => (
+              <tr key={row.year} className="border-b border-slate-50 hover:bg-slate-50 transition-colors">
+                <td className="py-1.5 px-2 font-black text-slate-700">{row.year}</td>
+                <td className="py-1.5 px-2 text-right font-bold text-slate-900">{row.revenue}</td>
+                <td className="py-1.5 px-2 text-right font-bold text-orange-500">{row.op_profit}</td>
+                <td className="py-1.5 px-2 text-right font-bold text-blue-600">{row.net_income}</td>
+                <td className="py-1.5 px-2 text-right font-bold text-emerald-600">{row.roe}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
+// ──────────────────────────────────────────────────────────────────────────
+// DisclosuresPanel — 최근 공시 목록
+// ──────────────────────────────────────────────────────────────────────────
+const DisclosuresPanel = ({ disclosures, discLoading }) => {
+  if (discLoading) {
+    return (
+      <div className="p-5 rounded-2xl border border-slate-100 bg-slate-50 flex items-center gap-3">
+        <Loader2 className="animate-spin w-4 h-4 text-blue-400 shrink-0" />
+        <span className="text-xs text-slate-400">공시 목록 로딩 중...</span>
+      </div>
+    );
+  }
+  if (!disclosures || disclosures.length === 0) return null;
+
+  return (
+    <div className="p-5 rounded-2xl border border-slate-200 bg-white">
+      <h3 className="font-black text-slate-800 flex items-center gap-2 text-sm mb-3">
+        <FileText className="w-4 h-4 text-violet-500" /> 최근 DART 공시
+      </h3>
+      <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
+        {disclosures.map((d) => (
+          <a
+            key={d.rcept_no}
+            href={d.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-start gap-2 group hover:bg-slate-50 rounded-lg px-2 py-1.5 transition-colors"
+          >
+            <span className="text-[10px] font-bold text-slate-300 shrink-0 mt-0.5 whitespace-nowrap">
+              {d.date ? `${d.date.slice(0, 4)}-${d.date.slice(4, 6)}-${d.date.slice(6, 8)}` : ''}
+            </span>
+            <span className="text-xs text-slate-600 group-hover:text-blue-600 transition-colors flex-1 leading-relaxed">
+              {d.title}
+            </span>
+            <ExternalLink className="w-3 h-3 text-slate-300 group-hover:text-blue-400 shrink-0 mt-0.5" />
+          </a>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+// ──────────────────────────────────────────────────────────────────────────
 // StockDetail
 // ──────────────────────────────────────────────────────────────────────────
-const StockDetail = ({ stock, filters, bookmarked, onToggleBookmark, maVisible, setMaVisible, visibleRange, setVisibleRange }) => (
+const StockDetail = ({ stock, filters, bookmarked, onToggleBookmark, maVisible, setMaVisible, visibleRange, setVisibleRange, dartData, dartLoading, disclosures, discLoading }) => (
   <div className="bg-white rounded-3xl border border-slate-200 shadow-xl p-8 sticky top-24 overflow-hidden">
     {/* 헤더 */}
     <div className="flex justify-between items-start mb-6">
@@ -391,6 +490,12 @@ const StockDetail = ({ stock, filters, bookmarked, onToggleBookmark, maVisible, 
         </p>
       </div>
     </div>
+
+    {/* DART 실시간 패널 */}
+    <div className="mt-6 space-y-4">
+      <DartFinancialPanel dartData={dartData} dartLoading={dartLoading} />
+      <DisclosuresPanel disclosures={disclosures} discLoading={discLoading} />
+    </div>
   </div>
 );
 
@@ -415,6 +520,12 @@ const App = () => {
 
   const [maVisible, setMaVisible] = useState({ 5: true, 10: false, 20: true, 60: true, 120: false, 240: false });
   const [visibleRange, setVisibleRange] = useState(60);
+
+  // DART 실시간 데이터
+  const [dartData, setDartData] = useState(null);
+  const [dartLoading, setDartLoading] = useState(false);
+  const [disclosures, setDisclosures] = useState(null);
+  const [discLoading, setDiscLoading] = useState(false);
 
   const [savedQueries, setSavedQueries] = useState([
     { id: 1, text: 'RSI 50~70 사이 섹터 주도주', date: '2026-04-18' },
@@ -472,6 +583,29 @@ const App = () => {
       } catch { /* 무시 */ }
     })();
   }, [selectedStock?.code, dataSource]);
+
+  // ── DART 실시간 데이터 lazy-load ────────────────────────────────────────
+  useEffect(() => {
+    if (!selectedStock) return;
+    setDartData(null);
+    setDisclosures(null);
+
+    let cancelled = false;
+
+    setDartLoading(true);
+    api.stockDart(selectedStock.code)
+      .then((d) => { if (!cancelled) setDartData(d); })
+      .catch(() => { if (!cancelled) setDartData(null); })
+      .finally(() => { if (!cancelled) setDartLoading(false); });
+
+    setDiscLoading(true);
+    api.stockDisclosures(selectedStock.code)
+      .then((d) => { if (!cancelled) setDisclosures(d.disclosures || []); })
+      .catch(() => { if (!cancelled) setDisclosures([]); })
+      .finally(() => { if (!cancelled) setDiscLoading(false); });
+
+    return () => { cancelled = true; };
+  }, [selectedStock?.code]);
 
   // ── 로컬 폴백 파서 ───────────────────────────────────────────────────────
   const localParse = useCallback((text) => {
@@ -722,6 +856,10 @@ const App = () => {
                   setMaVisible={setMaVisible}
                   visibleRange={visibleRange}
                   setVisibleRange={setVisibleRange}
+                  dartData={dartData}
+                  dartLoading={dartLoading}
+                  disclosures={disclosures}
+                  discLoading={discLoading}
                 />
               ) : (
                 <div className="h-[500px] flex flex-col items-center justify-center border-4 border-dashed border-slate-200 rounded-3xl text-slate-200 bg-white/50">

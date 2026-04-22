@@ -34,6 +34,21 @@ SUPABASE_ANON_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv(
     "SUPABASE_ANON_KEY", ""
 )
 
+# DART API
+DART_LIST_URL = "https://opendart.fss.or.kr/api/list.json"
+DART_FIN_URL  = "https://opendart.fss.or.kr/api/fnlttSinglAcnt.json"
+DART_API_KEY  = os.getenv("DART_API_KEY", "")
+
+DISCLOSURE_TYPE_MAP = {
+    "대주주변동":  {"ty": "D", "kw": ["최대주주", "대량보유", "주요주주"]},
+    "유상증자":   {"ty": "B", "kw": ["유상증자"]},
+    "자사주매입": {"ty": "B", "kw": ["자기주식", "자사주"]},
+    "CB발행":     {"ty": "C", "kw": ["전환사채", "교환사채"]},
+    "무상증자":   {"ty": "B", "kw": ["무상증자"]},
+    "내부자거래": {"ty": "D", "kw": ["임원", "주요주주특정"]},
+    "실적공시":   {"ty": "A", "kw": ["사업보고서", "반기보고서", "분기보고서"]},
+}
+
 
 def _supabase_or_none():
     if not SUPABASE_URL or not SUPABASE_ANON_KEY:
@@ -45,6 +60,51 @@ def _supabase_or_none():
     except Exception as e:  # noqa: BLE001
         print(f"[supabase] init failed: {e}")
         return None
+
+
+# --- DART 공시 유틸 ---------------------------------------------------------
+
+def _dart_disclosure_codes(disclosure_type: str, days: int) -> set[str]:
+    """DART에서 특정 유형 공시가 있는 종목코드 집합 반환."""
+    import requests as req
+    from datetime import timedelta
+    cfg = DISCLOSURE_TYPE_MAP.get(disclosure_type)
+    if not cfg or not DART_API_KEY:
+        return set()
+    end_dt = datetime.utcnow().date()
+    bgn_dt = end_dt - timedelta(days=days)
+    codes: set[str] = set()
+    page = 1
+    while True:
+        try:
+            r = req.get(DART_LIST_URL, params={
+                "crtfc_key": DART_API_KEY,
+                "bgn_de": bgn_dt.strftime("%Y%m%d"),
+                "end_de": end_dt.strftime("%Y%m%d"),
+                "pblntf_ty": cfg["ty"],
+                "page_no": page,
+                "page_count": 100,
+            }, timeout=20)
+            data = r.json()
+            if data.get("status") != "000":
+                break
+            items = data.get("list", [])
+            if not items:
+                break
+            for item in items:
+                report_nm = item.get("report_nm", "")
+                stock_code = (item.get("stock_code") or "").strip()
+                if stock_code and any(kw in report_nm for kw in cfg["kw"]):
+                    codes.add(stock_code)
+            total = int(data.get("total_count", 0))
+            if page * 100 >= total:
+                break
+            page += 1
+        except Exception as e:
+            print(f"[dart_disc] {e}")
+            break
+    print(f"[dart_disc] {disclosure_type} → {len(codes)}개 종목")
+    return codes
 
 
 # --- 폴백용 mock (프론트의 mockStocks.js와 동일한 구조) -------------------
@@ -370,6 +430,124 @@ def list_commodities() -> dict[str, Any]:
     }
 
 
+@app.get("/api/stocks/{code}/dart")
+def stock_dart_detail(code: str) -> dict[str, Any]:
+    """종목 클릭 시 실시간 DART 재무 상세 (4년치)."""
+    try:
+        from data_collector import _dart_corp_codes, DART_API_KEY as DC_DART_KEY
+        import requests as req
+
+        dart_key = DART_API_KEY or DC_DART_KEY
+        if not dart_key:
+            raise HTTPException(503, "DART_API_KEY 미설정")
+
+        corp_map = _dart_corp_codes()
+        corp_code = corp_map.get(code)
+        if not corp_code:
+            raise HTTPException(404, f"DART corp_code 없음: {code}")
+
+        current_year = datetime.utcnow().year
+        years = [current_year - 1, current_year - 2, current_year - 3, current_year - 4]
+
+        def fmt(v: Any) -> str:
+            if not v:
+                return "-"
+            try:
+                v = int(v)
+            except Exception:
+                return "-"
+            if abs(v) >= 1_000_000_000_000:
+                return f"{v / 1_000_000_000_000:.1f}조"
+            return f"{v / 100_000_000:.0f}억"
+
+        yearly: list[dict] = []
+        for year in years:
+            for fs_div in ["CFS", "OFS"]:
+                r = req.get(DART_FIN_URL, params={
+                    "crtfc_key": dart_key,
+                    "corp_code": corp_code,
+                    "bsns_year": str(year),
+                    "reprt_code": "11011",
+                    "fs_div": fs_div,
+                }, timeout=20)
+                data = r.json()
+                if data.get("status") != "000":
+                    continue
+                items: dict[str, int] = {}
+                for item in data.get("list", []):
+                    val = (item.get("thstrm_amount") or "").replace(",", "")
+                    try:
+                        items[item["account_nm"]] = int(val)
+                    except Exception:
+                        pass
+                if items:
+                    revenue = items.get("매출액") or items.get("수익(매출액)")
+                    op_profit = items.get("영업이익")
+                    net_income = items.get("당기순이익")
+                    equity = items.get("자본총계")
+                    roe = round(net_income / equity * 100, 1) if equity and net_income else None
+                    yearly.append({
+                        "year": year,
+                        "revenue": fmt(revenue),
+                        "op_profit": fmt(op_profit),
+                        "net_income": fmt(net_income),
+                        "roe": f"{roe}%" if roe is not None else "-",
+                        "revenue_raw": revenue,
+                        "op_profit_raw": op_profit,
+                    })
+                    break  # CFS 성공 시 OFS 시도 불필요
+
+        return {"code": code, "yearly": yearly}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[dart_detail] {code}: {e}")
+        raise HTTPException(500, str(e))
+
+
+@app.get("/api/stocks/{code}/disclosures")
+def stock_disclosures(code: str, days: int = 90) -> dict[str, Any]:
+    """종목의 최근 공시 목록 실시간 조회."""
+    try:
+        from data_collector import _dart_corp_codes, DART_API_KEY as DC_DART_KEY
+        import requests as req
+        from datetime import timedelta
+
+        dart_key = DART_API_KEY or DC_DART_KEY
+        if not dart_key:
+            return {"code": code, "disclosures": []}
+
+        corp_map = _dart_corp_codes()
+        corp_code = corp_map.get(code)
+        if not corp_code:
+            return {"code": code, "disclosures": []}
+
+        end_dt = datetime.utcnow().date()
+        bgn_dt = end_dt - timedelta(days=days)
+
+        r = req.get(DART_LIST_URL, params={
+            "crtfc_key": dart_key,
+            "corp_code": corp_code,
+            "bgn_de": bgn_dt.strftime("%Y%m%d"),
+            "end_de": end_dt.strftime("%Y%m%d"),
+            "page_count": 20,
+        }, timeout=20)
+        data = r.json()
+        items = []
+        for item in (data.get("list") or []):
+            items.append({
+                "date": item.get("rcept_dt", ""),
+                "title": item.get("report_nm", ""),
+                "filer": item.get("flr_nm", ""),
+                "rcept_no": item.get("rcept_no", ""),
+                "url": f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={item.get('rcept_no', '')}",
+            })
+        return {"code": code, "disclosures": items}
+    except Exception as e:
+        print(f"[disclosures] {code}: {e}")
+        return {"code": code, "disclosures": []}
+
+
 def _format_stock_row(r: dict[str, Any]) -> dict[str, Any]:
     raw_fin = r.get("financials") or {}
     financials = {
@@ -394,6 +572,9 @@ def _format_stock_row(r: dict[str, Any]) -> dict[str, Any]:
         "change":              float(r.get("change_pct") or 0),
         "market_cap_trillion": round(float(mkt_cap), 2) if mkt_cap else None,
         "dividend_yield":      round(float(div_yield), 2) if div_yield else None,
+        "per":                 round(float(r["per"]), 1) if r.get("per") else None,
+        "pbr":                 round(float(r["pbr"]), 2) if r.get("pbr") else None,
+        "roe":                 round(float(r["roe"]), 1) if r.get("roe") else None,
         "history":             [],
         "financials":          financials,
     }
@@ -477,7 +658,7 @@ def _search_by_date_change(
         return None
 
 
-def _search_stocks_from_db(f: dict[str, Any]) -> list[dict[str, Any]] | None:
+def _search_stocks_from_db(f: dict[str, Any], disc_codes: set[str] | None = None) -> list[dict[str, Any]] | None:
     """Supabase 쿼리 레벨에서 필터 적용 → 전체 2,891개 종목 대상 검색."""
     sb = _supabase_or_none()
     if sb is None:
@@ -486,7 +667,7 @@ def _search_stocks_from_db(f: dict[str, Any]) -> list[dict[str, Any]] | None:
         q = sb.table("stocks").select(
             "code, name, sector, is_leader, leader_name, buy_score, "
             "rsi, rsi_prev, profit_growth_years, close_price, change_pct, "
-            "market_cap_trillion, dividend_yield, financials"
+            "market_cap_trillion, dividend_yield, financials, per, pbr, roe"
         )
         # 섹터 필터
         if f.get("sector"):
@@ -514,10 +695,44 @@ def _search_stocks_from_db(f: dict[str, Any]) -> list[dict[str, Any]] | None:
             q = q.gte("change_pct", f["change_pct_min"])
         if f.get("change_pct_max") is not None:
             q = q.lte("change_pct", f["change_pct_max"])
+        # PER 필터
+        if f.get("per_max") is not None:
+            q = q.lte("per", f["per_max"]).not_.is_("per", "null")
+        if f.get("per_min") is not None:
+            q = q.gte("per", f["per_min"])
+        # PBR 필터
+        if f.get("pbr_max") is not None:
+            q = q.lte("pbr", f["pbr_max"]).not_.is_("pbr", "null")
+        # ROE 필터
+        if f.get("roe_min") is not None:
+            q = q.gte("roe", f["roe_min"])
+        # DART 공시 종목코드 필터 (AND)
+        if disc_codes:
+            q = q.in_("code", list(disc_codes))
 
         rows = q.order("buy_score", desc=True).limit(200).execute().data or []
         print(f"[search] filters={f} → {len(rows)}개 결과")
-        return [_format_stock_row(r) for r in rows]
+        results = [_format_stock_row(r) for r in rows]
+
+        # sort_by 처리
+        sort_by = f.get("sort_by")
+        if sort_by == "per":
+            results = [r for r in results if r.get("per") is not None]
+            results.sort(key=lambda r: r.get("per") or 9999)
+        elif sort_by == "roe":
+            results = [r for r in results if r.get("roe") is not None]
+            results.sort(key=lambda r: r.get("roe") or 0, reverse=True)
+        # 섹터 내 PER 순위 정렬 (per_max 또는 per_min 지정 시, sort_by 미지정)
+        elif f.get("per_max") is not None or f.get("per_min") is not None:
+            results = [r for r in results if r.get("per") is not None]
+            results.sort(key=lambda r: r.get("per") or 9999)
+
+        # top_n 제한
+        top_n = f.get("top_n")
+        if top_n and isinstance(top_n, int) and top_n > 0:
+            results = results[:top_n]
+
+        return results
     except Exception as e:
         print(f"[search] DB search failed: {e}")
         return None
@@ -532,18 +747,40 @@ def search(body: QueryBody) -> dict[str, Any]:
     change_min   = filters.get("change_pct_min")
     change_max   = filters.get("change_pct_max")
 
+    # DART 공시 필터 처리
+    disc_codes: set[str] | None = None
+    disc_note: str | None = None
+    if filters.get("disclosure_type"):
+        days = int(filters.get("disclosure_days") or 30)
+        disc_codes = _dart_disclosure_codes(filters["disclosure_type"], days)
+        disc_note = f"DART {filters['disclosure_type']} 공시 (최근 {days}일)"
+        if not disc_codes:
+            # DART 키 없거나 결과 없음 → 빈 결과
+            return {
+                "filters": filters,
+                "results": [],
+                "count": 0,
+                "note": disc_note + " - 결과 없음 (DART_API_KEY 미설정이거나 해당 공시 없음)",
+            }
+
     # 날짜 지정 시 stock_prices 기반 등락률 검색
     if target_date and (change_min is not None or change_max is not None):
         results = _search_by_date_change(target_date, change_min, change_max, filters)
         if results is None:
             results = []
         note = f"{target_date} 기준 등락률 검색"
+        # DART 공시 필터와 AND 조합
+        if disc_codes is not None:
+            results = [r for r in results if r["code"] in disc_codes]
     else:
-        results = _search_stocks_from_db(filters)
+        results = _search_stocks_from_db(filters, disc_codes=disc_codes)
         if results is None:
             results = _apply_filters(_MOCK_STOCKS, filters)
             results.sort(key=lambda s: s["buy_score"], reverse=True)
         note = None
+
+    if disc_note:
+        note = disc_note if not note else f"{note} + {disc_note}"
 
     resp: dict[str, Any] = {"filters": filters, "results": results, "count": len(results)}
     if note:

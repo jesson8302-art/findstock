@@ -472,25 +472,171 @@ def cmd_cleanup(keep_days: int = 365) -> None:
     print(f"[cleanup] 완료 ✓ (기준일: {cutoff})")
 
 
+def _dart_multi_fetch(corp_codes: list[str], year: int, fs_div: str = "CFS") -> dict[str, dict]:
+    """다중회사 일괄 재무 조회 (최대 100개). corp_code → {계정명: 금액}."""
+    url = "https://opendart.fss.or.kr/api/fnlttMultiAcnt.json"
+    params = {
+        "crtfc_key": DART_API_KEY,
+        "corp_code": ",".join(corp_codes),
+        "bsns_year": str(year),
+        "reprt_code": "11011",  # 사업보고서
+        "fs_div": fs_div,
+    }
+    try:
+        r = requests.get(url, params=params, timeout=30)
+        data = r.json()
+        if data.get("status") != "000":
+            return {}
+        result: dict[str, dict] = {}
+        for item in data.get("list", []):
+            corp = item.get("corp_code", "")
+            acct = item.get("account_nm", "")
+            val_str = item.get("thstrm_amount", "") or ""
+            if not val_str or val_str.strip() in ("", "-"):
+                continue
+            try:
+                val = int(val_str.replace(",", ""))
+                result.setdefault(corp, {})[acct] = val
+            except ValueError:
+                continue
+        return result
+    except Exception as e:
+        print(f"  [dart_multi] {year}/{fs_div} 오류: {e}")
+        return {}
+
+
 def cmd_dart() -> None:
-    """DART API로 재무 데이터 갱신."""
-    sb     = _supabase()
-    stocks = sb.table("stocks").select("code, name").execute().data or []
-    print(f"[dart] {len(stocks)}개 종목 재무 수집")
+    """DART 다중회사 일괄 API로 4년치 재무 수집 + profit_growth_years + PER 계산."""
+    sb = _supabase()
+    current_year = date.today().year
+    YEARS = [current_year - 1, current_year - 2, current_year - 3, current_year - 4]
+
+    print(f"\n{'='*60}")
+    print(f"[dart] 4년치 재무 일괄 수집 ({YEARS[-1]}~{YEARS[0]}년)")
+    print(f"{'='*60}\n")
+
+    # ── 1. corp_code 매핑 ──────────────────────────────────────────────────
     print("  corp_code 매핑 다운로드...", end=" ", flush=True)
-    corp_map = _dart_corp_codes()
-    print(f"✓ {len(corp_map)}개")
-    for s in stocks:
-        code, name = s["code"], s["name"]
-        cc = corp_map.get(code)
-        if not cc:
-            continue
-        fin = _dart_financials(cc)
-        if fin:
-            sb.table("stocks").update({"financials": fin}).eq("code", code).execute()
-            print(f"  {name}({code}) ✓ 매출={fin['revenue']}")
-        time.sleep(0.3)
-    print("[dart] 완료 ✓")
+    corp_map = _dart_corp_codes()   # {stock_code: corp_code}
+    print(f"✓ {len(corp_map)}개\n")
+
+    # ── 2. Supabase 종목 목록 ─────────────────────────────────────────────
+    stocks = sb.table("stocks").select("code, name, market_cap_trillion").execute().data or []
+    # stock_code → (corp_code, stock_row)
+    sc_map = {s["code"]: (corp_map[s["code"]], s)
+              for s in stocks if s["code"] in corp_map}
+    corp_codes_all = list({cc for cc, _ in sc_map.values()})
+    print(f"  DART 대상: {len(sc_map)}개 종목\n")
+
+    # ── 3. 연도별 다중회사 일괄 조회 ─────────────────────────────────────
+    # yearly_data[year][corp_code] = {계정명: 금액}
+    yearly_data: dict[int, dict[str, dict]] = {}
+    BATCH = 100
+
+    for year in YEARS:
+        print(f"  [{year}년] CFS 조회 중...", end=" ", flush=True)
+        cfs_data: dict[str, dict] = {}
+        for i in range(0, len(corp_codes_all), BATCH):
+            batch = corp_codes_all[i:i + BATCH]
+            cfs_data.update(_dart_multi_fetch(batch, year, "CFS"))
+            time.sleep(0.4)
+
+        # CFS 없는 회사는 OFS로 재시도
+        missing = [cc for cc in corp_codes_all if cc not in cfs_data]
+        if missing:
+            print(f"OFS 보완({len(missing)}개)...", end=" ", flush=True)
+            for i in range(0, len(missing), BATCH):
+                batch = missing[i:i + BATCH]
+                cfs_data.update(_dart_multi_fetch(batch, year, "OFS"))
+                time.sleep(0.4)
+
+        yearly_data[year] = cfs_data
+        print(f"✓ {len(cfs_data)}개 회사")
+
+    # ── 4. 종목별 지표 계산 ───────────────────────────────────────────────
+    print(f"\n  지표 계산 중...")
+
+    def fmt(v: int | None) -> str:
+        if not v:
+            return "-"
+        if abs(v) >= 1_000_000_000_000:
+            return f"{v / 1e12:.1f}조"
+        return f"{v / 1e8:.0f}억"
+
+    update_rows: list[dict] = []
+    for stock_code, (corp_code, stock_row) in sc_map.items():
+        # 연도별 영업이익 수집
+        op_profits: dict[int, int] = {}
+        for year in YEARS:
+            corp_data = yearly_data.get(year, {}).get(corp_code, {})
+            op = corp_data.get("영업이익")
+            if op is not None:
+                op_profits[year] = op
+
+        # profit_growth_years: 최근 연도부터 연속 증가 횟수
+        years_sorted = sorted(op_profits.keys(), reverse=True)
+        growth_years = 0
+        for i in range(len(years_sorted) - 1):
+            if op_profits[years_sorted[i]] > op_profits[years_sorted[i + 1]]:
+                growth_years += 1
+            else:
+                break
+
+        # 최신 연도 재무
+        latest = yearly_data.get(YEARS[0], {}).get(corp_code, {})
+        revenue    = latest.get("매출액") or latest.get("수익(매출액)")
+        op_latest  = latest.get("영업이익")
+        net_income = latest.get("당기순이익")
+        equity     = latest.get("자본총계")
+        roe = round(net_income / equity * 100, 1) if equity and net_income else None
+
+        # PER = 시가총액 / 당기순이익
+        mkt = stock_row.get("market_cap_trillion")
+        per = None
+        if mkt and net_income and net_income > 0:
+            per = round(float(mkt) * 1e12 / net_income, 1)
+
+        financials = {
+            "revenue": fmt(revenue),
+            "profit":  fmt(op_latest),
+            "roe":     f"{roe}%" if roe else "-",
+            "desc":    "",
+            "op_profits": {str(y): p for y, p in op_profits.items()},
+        }
+
+        update_rows.append({
+            "code":               stock_code,
+            "financials":         financials,
+            "profit_growth_years": growth_years,
+            "per":                per,
+        })
+
+    print(f"  ✓ {len(update_rows)}개 계산 완료\n")
+
+    # ── 5. Supabase 업데이트 ──────────────────────────────────────────────
+    print("  Supabase 업데이트 중...")
+    ok = 0
+    for row in update_rows:
+        try:
+            sb.table("stocks").update({
+                "financials":          row["financials"],
+                "profit_growth_years": row["profit_growth_years"],
+                "per":                 row["per"],
+            }).eq("code", row["code"]).execute()
+            ok += 1
+            if ok % 100 == 0:
+                print(f"  {ok}/{len(update_rows)} ...", end="\r")
+        except Exception as e:
+            print(f"  [update 오류] {row['code']}: {e}")
+
+    print(f"  ✓ {ok}개 완료           \n")
+
+    # 요약
+    has_3y = sum(1 for r in update_rows if r["profit_growth_years"] >= 3)
+    has_per = sum(1 for r in update_rows if r["per"] is not None)
+    print(f"{'='*60}")
+    print(f"[dart] 완료 ✓  3년↑성장: {has_3y}개 | PER 산출: {has_per}개")
+    print(f"{'='*60}\n")
 
 
 def _gemini_classify_batch(batch: list[dict]) -> dict[str, str]:

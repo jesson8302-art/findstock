@@ -42,4 +42,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ query: text }),
     }),
+
+  // GET /api/stocks/:code/dart → 실시간 DART 재무 4년치
+  stockDart: (code) => request(`/api/stocks/${code}/dart`),
+
+  // GET /api/stocks/:code/disclosures → 최근 공시 목록
+  stockDisclosures: (code, days = 90) => request(`/api/stocks/${code}/disclosures?days=${days}`),
 };

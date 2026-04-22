@@ -7,7 +7,12 @@
     "is_leader": bool | null,
     "sector": str | null,
     "market_cap_trillion_min": number | null,
-    "dividend_yield_min": number | null
+    "dividend_yield_min": number | null,
+    "disclosure_type": str | null,
+    "disclosure_days": int | null,
+    "pbr_max": number | null,
+    "roe_min": number | null,
+    "sort_by": str | null,
 }
 
 Gemini 키가 없거나 호출이 실패하면 간단한 정규식 기반 로컬 파서로 폴백한다.
@@ -35,13 +40,23 @@ Convert the user's natural language request into a JSON object with these option
 - change_pct_min: number (minimum daily price change %, e.g. 5 means stocks up 5% or more, 20 means up 20%+)
 - change_pct_max: number (maximum daily price change %)
 - target_date: string YYYY-MM-DD (convert Korean date expressions to this format, current year is 2026. Examples: "4월6일"→"2026-04-06", "4/21"→"2026-04-21", "어제"→yesterday's date)
+- per_max: number (maximum PER, e.g. 15 means PER 15 이하 저평가 종목)
+- per_min: number (minimum PER)
+- top_n: integer (return only top N results, e.g. "상위 3개" → 3)
+- disclosure_type: string (DART 공시 유형: "대주주변동", "유상증자", "자사주매입", "CB발행", "무상증자", "내부자거래", "실적공시")
+- disclosure_days: integer (최근 N일 이내 공시, 예: 30)
+- pbr_max: number (최대 PBR, e.g. 1.5 means PBR 1.5 이하)
+- roe_min: number (최소 ROE %, e.g. 10 means ROE 10% 이상)
+- sort_by: string ("per" = PER 낮은순, "roe" = ROE 높은순, "buy_score" = 기본)
 
 Return ONLY a valid JSON object. Omit keys if not specified.
 """
 
 KNOWN_SECTORS = [
-    "반도체", "자동차", "인터넷", "바이오", "2차전지",
-    "금융", "화학", "철강", "통신", "건설", "유통", "엔터", "게임",
+    "반도체", "자동차", "2차전지", "인터넷", "바이오", "금융",
+    "화학", "철강", "통신", "건설", "유통", "엔터", "게임",
+    "방산", "조선", "기계장비", "에너지", "음식료", "의료기기",
+    "소프트웨어", "의류패션", "운송물류", "부동산",
 ]
 
 
@@ -134,6 +149,46 @@ def _local_parse(text: str) -> dict[str, Any]:
     div = re.search(r"배당\s*(?:수익률\s*)?(\d+(?:\.\d+)?)\s*%\s*이상", text)
     if div:
         filters["dividend_yield_min"] = float(div.group(1))
+
+    # DART 공시 유형
+    _DISC_KW = {
+        "대주주변동": ["대주주 변동", "대주주변동", "최대주주 변경", "최대주주변경"],
+        "유상증자": ["유상증자"],
+        "자사주매입": ["자사주", "자기주식 취득"],
+        "CB발행": ["전환사채", "CB 발행", "CB발행", "교환사채"],
+        "무상증자": ["무상증자"],
+        "내부자거래": ["내부자 거래", "내부자거래", "임원 매매"],
+        "실적공시": ["실적공시", "사업보고서", "분기보고서", "반기보고서"],
+    }
+    for disc_type, kws in _DISC_KW.items():
+        if any(kw in text for kw in kws):
+            filters["disclosure_type"] = disc_type
+            break
+
+    # 공시 기간: "최근 N일", "N개월 이내", "1개월"
+    m_days = re.search(r"최근\s*(\d+)\s*일", text)
+    if m_days:
+        filters["disclosure_days"] = int(m_days.group(1))
+    else:
+        m_months = re.search(r"(\d+)\s*개월\s*(?:이내|내)", text)
+        if m_months:
+            filters["disclosure_days"] = int(m_months.group(1)) * 30
+
+    # PBR
+    m_pbr = re.search(r"PBR\s*(\d+(?:\.\d+)?)\s*이하", text, re.IGNORECASE)
+    if m_pbr:
+        filters["pbr_max"] = float(m_pbr.group(1))
+
+    # ROE
+    m_roe = re.search(r"ROE\s*(\d+(?:\.\d+)?)\s*%?\s*이상", text, re.IGNORECASE)
+    if m_roe:
+        filters["roe_min"] = float(m_roe.group(1))
+
+    # sort_by
+    if re.search(r"PER\s*낮은\s*순|저PER\s*순", text, re.IGNORECASE):
+        filters["sort_by"] = "per"
+    elif re.search(r"ROE\s*높은\s*순|고ROE\s*순", text, re.IGNORECASE):
+        filters["sort_by"] = "roe"
 
     return filters
 
