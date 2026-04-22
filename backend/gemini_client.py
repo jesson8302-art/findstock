@@ -29,7 +29,7 @@ Convert the user's natural language request into a JSON object with these option
 - rsi: {min: integer 0-100, max: integer 0-100}
 - profit_growth_years: integer (minimum consecutive years of operating profit growth)
 - is_leader: boolean (true if user wants sector leader / 주도주 / 대장주)
-- sector: string (one of 반도체, 자동차, 인터넷, 바이오, 2차전지, 금융, 화학, 철강, 통신, 건설, 유통, 엔터, 게임, 기타)
+- sector: string (one of 반도체, 자동차, 인터넷, 바이오, 2차전지, 금융, 화학, 철강, 통신, 건설, 유통, 엔터, 게임, 방산, 조선, 기타)
 - market_cap_trillion_min: number (minimum market cap in trillion KRW)
 - dividend_yield_min: number (minimum dividend yield in %)
 - change_pct_min: number (minimum daily price change %, e.g. 5 means stocks up 5% or more, 20 means up 20%+)
