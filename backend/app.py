@@ -28,8 +28,9 @@ from gemini_client import parse_query as gemini_parse
 load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY") or os.getenv(
-    "SUPABASE_SERVICE_ROLE_KEY", ""
+# 백엔드는 서버사이드이므로 service role 키 우선 사용 (RLS 우회)
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv(
+    "SUPABASE_ANON_KEY", ""
 )
 
 
