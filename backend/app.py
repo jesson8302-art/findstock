@@ -339,10 +339,82 @@ def list_commodities() -> dict[str, Any]:
     }
 
 
+def _search_stocks_from_db(f: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Supabase 쿼리 레벨에서 필터 적용 → 전체 2,891개 종목 대상 검색."""
+    sb = _supabase_or_none()
+    if sb is None:
+        return None
+    try:
+        q = sb.table("stocks").select(
+            "code, name, sector, is_leader, leader_name, buy_score, "
+            "rsi, rsi_prev, profit_growth_years, close_price, change_pct, "
+            "market_cap_trillion, dividend_yield, financials"
+        )
+        # 섹터 필터
+        if f.get("sector"):
+            q = q.eq("sector", f["sector"])
+        # RSI 범위
+        rsi = f.get("rsi") or {}
+        if rsi.get("min") is not None:
+            q = q.gte("rsi", rsi["min"])
+        if rsi.get("max") is not None:
+            q = q.lte("rsi", rsi["max"])
+        # 주도주 여부
+        if f.get("is_leader") is True:
+            q = q.eq("is_leader", True)
+        # 연속 성장 연수
+        if f.get("profit_growth_years") is not None:
+            q = q.gte("profit_growth_years", f["profit_growth_years"])
+        # 시가총액 최솟값
+        if f.get("market_cap_trillion_min") is not None:
+            q = q.gte("market_cap_trillion", f["market_cap_trillion_min"])
+        # 배당수익률 최솟값
+        if f.get("dividend_yield_min") is not None:
+            q = q.gte("dividend_yield", f["dividend_yield_min"])
+
+        rows = q.order("buy_score", desc=True).limit(200).execute().data or []
+
+        results = []
+        for r in rows:
+            raw_fin = r.get("financials") or {}
+            financials = {
+                "revenue": raw_fin.get("revenue") or "-",
+                "profit":  raw_fin.get("profit")  or "-",
+                "roe":     raw_fin.get("roe")      or "-",
+                "desc":    raw_fin.get("desc")     or "",
+            }
+            mkt_cap   = r.get("market_cap_trillion")
+            div_yield = r.get("dividend_yield")
+            results.append({
+                "code":                r["code"],
+                "name":                r["name"],
+                "sector":              r.get("sector") or "기타",
+                "is_leader":           bool(r.get("is_leader")),
+                "leader_name":         r.get("leader_name") or r["name"],
+                "buy_score":           int(r.get("buy_score") or 0),
+                "rsi":                 int(r.get("rsi") or 50),
+                "rsi_prev":            int(r.get("rsi_prev") or 50),
+                "profit_growth_years": int(r.get("profit_growth_years") or 0),
+                "price":               int(r.get("close_price") or 0),
+                "change":              float(r.get("change_pct") or 0),
+                "market_cap_trillion": round(float(mkt_cap), 2) if mkt_cap else None,
+                "dividend_yield":      round(float(div_yield), 2) if div_yield else None,
+                "history":             [],
+                "financials":          financials,
+            })
+        return results
+    except Exception as e:
+        print(f"[search] DB search failed: {e}")
+        return None
+
+
 @app.post("/api/search")
 def search(body: QueryBody) -> dict[str, Any]:
     filters = gemini_parse(body.query)
-    stocks = _load_stocks_from_db() or _MOCK_STOCKS
-    results = _apply_filters(stocks, filters)
-    results.sort(key=lambda s: s["buy_score"], reverse=True)
+    # DB 레벨 필터링 (전체 종목 대상)
+    results = _search_stocks_from_db(filters)
+    if results is None:
+        # DB 없으면 mock에서 Python 필터링
+        results = _apply_filters(_MOCK_STOCKS, filters)
+        results.sort(key=lambda s: s["buy_score"], reverse=True)
     return {"filters": filters, "results": results, "count": len(results)}
