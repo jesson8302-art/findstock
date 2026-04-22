@@ -485,6 +485,7 @@ def _search_stocks_from_db(f: dict[str, Any]) -> list[dict[str, Any]] | None:
             q = q.lte("change_pct", f["change_pct_max"])
 
         rows = q.order("buy_score", desc=True).limit(200).execute().data or []
+        print(f"[search] filters={f} → {len(rows)}개 결과")
         return [_format_stock_row(r) for r in rows]
     except Exception as e:
         print(f"[search] DB search failed: {e}")
@@ -494,6 +495,7 @@ def _search_stocks_from_db(f: dict[str, Any]) -> list[dict[str, Any]] | None:
 @app.post("/api/search")
 def search(body: QueryBody) -> dict[str, Any]:
     filters = gemini_parse(body.query)
+    print(f"[search] query='{body.query}' → filters={filters}")
 
     target_date  = filters.get("target_date")
     change_min   = filters.get("change_pct_min")
